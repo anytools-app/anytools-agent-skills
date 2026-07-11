@@ -29,7 +29,7 @@
 
 ## Grok
 
-- 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する
+- 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する(2026-07-11 クレジット購入後に read-only スモークで疎通確認済み: exit 0・2秒・sessionId 取得。同日実測でモデルラインナップが grok-4.20/4.3/4.5 系へ変わり、`--output-format json` の応答構造も `{text, stopReason, sessionId, requestId}` に変化 — `type` フィールド無し。delegate-run の sessionId 抽出はそのまま動作)
 - `grok models` の1行目に「You are using XAI_API_KEY」が出なければ `~/.zshenv` の `XAI_API_KEY` を確認(PATH は非対話シェルに入らないためフルパス呼び出しも必須)
 - macOS(Seatbelt)ではネットワーク遮断が効かず、sandbox は書き込み保護のみ
 

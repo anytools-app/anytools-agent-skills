@@ -6,7 +6,7 @@
 
 - **フルパス `~/.grok/bin/grok` で呼ぶ**(PATH 追加は `.zshrc` のみで、非対話シェルには入らない)
 - 認証は環境変数 `XAI_API_KEY`(`~/.zshenv` で設定済み)で、`grok login` は不要。API 従量課金
-- モデルは既定(grok-build)でよい。一覧は `~/.grok/bin/grok models`。軽重は `--effort low|medium|high|xhigh` で付ける
+- モデルは既定でよい(2026-07-11 実測の既定: `grok-4.20-0309-non-reasoning`。ラインナップは grok-build 系から grok-4.20 / 4.3 / 4.5 系へ世代交代済み)。一覧は `~/.grok/bin/grok models` で確認し、変わっていたらこの記述を更新する。軽重は `--effort low|medium|high|xhigh` で付ける(現行の non-reasoning 既定モデルでの effort の効きは未再検証)
 
 ## 相談(read-only)
 
@@ -44,7 +44,7 @@ Codex と同一の規律(ベースライン・指示書・マニフェスト照�
 - **`--sandbox` を毎回明示する**(デフォルトは off)。OSレベル(macOS: Seatbelt)で書き込みが制限される。ただし macOS ではネットワーク遮断は効かないため、read-only は「書き込み保護のみ」と考える。`--sandbox workspace` の書き込みは CWD・/tmp・`~/.grok` に限定される
 - `--yolo`(全ツール自動承認)はヘッドレスでは実質必須(承認プロンプトを出せない)。**必ず `--sandbox` とセットで使う**
 - `--max-turns <N>` で暴走を抑制できる(書き込み委任では必ず付ける)
-- `--output-format json` を付け、session id はログファイルの JSON の `sessionId` から取る(先に `type` が `error` でないか確認)。**実行のたびに控える**
+- `--output-format json` を付け、session id はログファイルの JSON の `sessionId` から取る。**実行のたびに控える**。正常応答の構造は `{text, stopReason, sessionId, requestId}`(2026-07-11 実測。`type` フィールドは無くなった — `sessionId` が取れない・`stopReason` が `EndTurn` でない場合はログ全文を確認)
 - 継続は `-r <SESSION_ID>`。**sandbox はセッションに保存され resume で自動復元される**(codex と違い付け直し不要。異なる指定はエラーになる)
 - 生ログの隔離・`< /dev/null` の作法は codex と同じ(`codex.md`「実行の作法」)
 
