@@ -5,7 +5,7 @@
   "author": {
     "name": "anytools"
   },
-  "homepage": "https://github.com/yujiro/anytools-agent-skills",
+  "homepage": "https://github.com/anytools-app/anytools-agent-skills",
   "license": "MIT",
   "keywords": ["delegation", "codex", "grok", "antigravity", "multi-agent", "orchestration"]
 }

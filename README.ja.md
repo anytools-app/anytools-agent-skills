@@ -29,14 +29,14 @@ Claude Code を**司令塔**にして、外部 AI CLI(OpenAI Codex / xAI Grok / 
 ### A. Claude Code プラグインとして(推奨)
 
 ```bash
-claude plugin marketplace add yujiro/anytools-agent-skills
+claude plugin marketplace add anytools-app/anytools-agent-skills
 claude plugin install anytools-agent-skills
 ```
 
 ### B. git clone + symlink(スキルを直接管理したい場合)
 
 ```bash
-git clone https://github.com/yujiro/anytools-agent-skills.git
+git clone https://github.com/anytools-app/anytools-agent-skills.git
 cd anytools-agent-skills
 cp skills/delegate/.env.example skills/delegate/.env   # ログ保存先を変えたい場合に編集
 ln -s "$PWD/skills/delegate" ~/.claude/skills/delegate
@@ -116,7 +116,7 @@ skills/delegate/
 
 ## バージョン
 
-[CHANGELOG.md](CHANGELOG.md) と [GitHub Releases](https://github.com/yujiro/anytools-agent-skills/releases) を参照(SemVer)。
+[CHANGELOG.md](CHANGELOG.md) と [GitHub Releases](https://github.com/anytools-app/anytools-agent-skills/releases) を参照(SemVer)。
 
 ## ライセンス
 

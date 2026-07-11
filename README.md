@@ -18,14 +18,14 @@ Every delegation goes through an auditable loop: baseline measurement → writte
 ## Install
 
 ```bash
-claude plugin marketplace add yujiro/anytools-agent-skills
+claude plugin marketplace add anytools-app/anytools-agent-skills
 claude plugin install anytools-agent-skills
 ```
 
 Or clone and symlink (if you want to manage the skill via git directly):
 
 ```bash
-git clone https://github.com/yujiro/anytools-agent-skills.git
+git clone https://github.com/anytools-app/anytools-agent-skills.git
 cd anytools-agent-skills
 cp skills/delegate/.env.example skills/delegate/.env
 ln -s "$PWD/skills/delegate" ~/.claude/skills/delegate
