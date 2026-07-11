@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-11
+
+### Added
+
+- SKILL.md「窓口(司令塔モデル)の固定」: 窓口=最終司令塔の2階層原則、メインセッションの model / effort をスキル・委任フローが変更しない不変条件(frontmatter への `model` / `effort` 記載禁止を含む)、委任先設定のみ可変とする分界、モデル切替に頼らないエスカレーション順。窓口モデルは settings.json の `"model": "best"` 固定を推奨
+
+### Changed
+
+- Grok adapter: 2026-07-11 実測を反映(モデルラインナップの grok-4.20/4.3/4.5 系への世代交代、`--output-format json` の応答構造変更)
+
 ## [0.1.0] - 2026-07-11
 
 ### Added

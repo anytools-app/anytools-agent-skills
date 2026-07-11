@@ -1,7 +1,7 @@
 {
   "name": "anytools-agent-skills",
   "description": "Delegation protocol for Claude Code as an orchestrator: route implementation to OpenAI Codex, web/X research to xAI Grok, large-context reading and independent review to Google Antigravity, while Claude Code owns design, instructions, review, and commits.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "anytools"
   },
