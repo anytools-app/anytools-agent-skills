@@ -31,6 +31,22 @@ cp skills/delegate/.env.example skills/delegate/.env
 ln -s "$PWD/skills/delegate" ~/.claude/skills/delegate
 ```
 
+## Pin the orchestrator model (recommended)
+
+The skill assumes the model you talk to — the main Claude Code session — is the single, pinned orchestrator (see 「窓口(司令塔モデル)の固定」 in `SKILL.md`). You never re-pick the orchestrator per task: implementation tokens flow to the workers, and per-task model selection happens on the worker side (Codex Luna/Terra/Sol etc.), so the orchestrator should simply be the strongest model you have — its diff-review quality is the ceiling for everything the workers produce.
+
+Add one line to `~/.claude/settings.json`:
+
+```json
+{
+  "model": "best"
+}
+```
+
+- `"best"` is an official alias resolving to Fable 5 where you have access, otherwise the latest Opus — the "which model?" decision disappears and the pin survives model generations
+- The skill never changes the main session's model or effort while running (no frontmatter overrides); only worker-side models and efforts vary per task
+- Optionally pair with `"effortLevel": "high"` for maximum orchestrator judgment, at higher token cost
+
 ## Configuration
 
 Log destination is configurable via `skills/delegate/.env` (precedence: process env > `.env` > default `~/.claude/logs/delegate`):
