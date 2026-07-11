@@ -1,0 +1,206 @@
+#!/bin/bash
+# delegate-run — 外部AI CLI 委任の安全なコマンドランナー(policy engine ではない)
+#
+# 担当する: provider 別 canonical command の生成 / 必須 sandbox 設定 / prompt file の読み込み /
+#   ログ隔離 / stdin 遮断 / timeout 設定 / session・conversation ID の取得 / exit code の記録 /
+#   実行前後の git status / 実行情報 JSONL の自動追記(run_id 発行)
+# 担当しない: 委任可否の判断 / provider・モデルの自動選択 / 製品判断 / diff レビュー /
+#   validation の合否判定 / 自動コミット / 自動 resume / 自動 handoff
+#
+# 使い方:
+#   delegate-run --cli codex --mode write --model gpt-5.6-terra --effort medium \
+#     --cd /path/to/repo --prompt-file /path/to/instruction.md [-o report.md] [--dry-run]
+#   delegate-run --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" \
+#     --cd /path/to/repo --prompt-file question.md [--timeout 10]
+#   delegate-run --cli grok --mode readonly --effort medium --cd /path/to/repo --prompt-file q.md
+#   resume/継続: --resume <SESSION_ID|CONVERSATION_UUID>(全フラグは自動で付け直される)
+#
+# 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
+#
+# ログ保存先: 環境変数 DELEGATE_LOG_DIR > スキル直下の .env > $HOME/.claude/logs/delegate
+set -u
+
+# symlink インストール(~/.claude/skills/delegate → リポジトリ)でも実体側の .env を読む
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_LOG_DIR="${DELEGATE_LOG_DIR:-}"; ENV_GROK_BIN="${GROK_BIN:-}"; ENV_AGY_BIN="${AGY_BIN:-}"
+[ -f "$SKILL_DIR/.env" ] && { set -a; . "$SKILL_DIR/.env"; set +a; }
+LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}}"
+RUNS_JSONL="$LOG_DIR/runs.jsonl"
+GROK_BIN="${ENV_GROK_BIN:-${GROK_BIN:-$HOME/.grok/bin/grok}}"
+AGY_BIN="${ENV_AGY_BIN:-${AGY_BIN:-$HOME/.local/bin/agy}}"
+
+die() { echo "delegate-run: ERROR: $*" >&2; exit 2; }
+warn() { echo "delegate-run: WARN: $*" >&2; }
+
+# ── 引数 ──────────────────────────────────────────────
+CLI="" MODE="" MODEL="" EFFORT="" CD="" PROMPT_FILE="" REPORT="" RESUME="" LOG_FILE=""
+TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cli) CLI="${2:?}"; shift 2 ;;
+    --mode) MODE="${2:?}"; shift 2 ;;
+    --model) MODEL="${2:?}"; shift 2 ;;
+    --effort) EFFORT="${2:?}"; shift 2 ;;
+    --cd) CD="${2:?}"; shift 2 ;;
+    --prompt-file) PROMPT_FILE="${2:?}"; shift 2 ;;
+    -o|--out-report) REPORT="${2:?}"; shift 2 ;;
+    --resume) RESUME="${2:?}"; shift 2 ;;
+    --log) LOG_FILE="${2:?}"; shift 2 ;;
+    --timeout) TIMEOUT_MIN="${2:?}"; shift 2 ;;
+    --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
+  esac
+done
+
+# ── 共通バリデーション ─────────────────────────────────
+case "$CLI" in codex|grok|agy) ;; *) die "--cli は codex|grok|agy" ;; esac
+case "$MODE" in write|readonly) ;; *) die "--mode は write|readonly" ;; esac
+[ -n "$CD" ] || die "--cd は必須"
+case "$CD" in /*) ;; *) die "--cd は絶対パスで指定する" ;; esac
+[ -d "$CD" ] || die "--cd が存在しない: $CD"
+[ -n "$PROMPT_FILE" ] || die "--prompt-file は必須"
+[ -s "$PROMPT_FILE" ] || die "prompt file が存在しないか空: $PROMPT_FILE"
+
+# CLI 別の前提チェック(既知事故の予防)
+case "$CLI" in
+  codex)
+    [ -n "$MODEL" ] || die "codex は --model 必須(config デフォルトに依存しない)"
+    [ -n "$EFFORT" ] || die "codex は --effort 必須(model_reasoning_effort を毎回明示する)"
+    # 「Not inside a trusted directory」の予防: --cd / 実行 cwd は git リポジトリ内であること
+    git -C "$CD" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || die "--cd が git リポジトリ内でない: $CD(codex は信頼済みディレクトリが必要。--skip-git-repo-check での回避はしない)"
+    [ -n "$TIMEOUT_MIN" ] && die "--timeout は agy 専用(codex はフォアグラウンド上限に注意し、大きい委任は呼び出し側で run_in_background)"
+    ;;
+  grok)
+    [ -x "$GROK_BIN" ] || die "grok CLI が見つからない: $GROK_BIN(フルパス呼び出しが前提)"
+    [ -n "$MODEL" ] && die "grok はモデル既定(grok-build)で使う。--model は指定しない"
+    [ -n "$REPORT" ] && die "-o/--out-report は codex 専用"
+    [ -n "$TIMEOUT_MIN" ] && die "--timeout は agy 専用"
+    if [ "$MODE" = "write" ] && [ -z "$MAX_TURNS" ]; then MAX_TURNS=40; fi
+    ;;
+  agy)
+    [ -x "$AGY_BIN" ] || die "agy CLI が見つからない: $AGY_BIN"
+    [ -n "$MODEL" ] || die "agy は --model 必須(agy models の表示名をそのまま渡す)"
+    [ -n "$EFFORT" ] && die "agy に effort 指定はない(モデル名の Low/High で選ぶ)"
+    [ -n "$REPORT" ] && die "-o/--out-report は codex 専用"
+    [ -z "$TIMEOUT_MIN" ] && TIMEOUT_MIN=10
+    ;;
+esac
+
+# ── run_id・ログ先 ─────────────────────────────────────
+RUN_ID="run_$(date +%Y%m%d-%H%M%S)_$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+mkdir -p "$LOG_DIR/runs"
+[ -n "$LOG_FILE" ] || LOG_FILE="$LOG_DIR/runs/$RUN_ID.log"
+
+# ── コマンド生成(canonical command は adapters/*.md が正) ──
+ARGS=()
+RUN_CWD="$CD"
+case "$CLI" in
+  codex)
+    if [ -n "$RESUME" ]; then
+      # resume は sandbox・モデル・effort を引き継がない実測があるため全フラグを付け直す。--last は使わない
+      ARGS=(codex exec resume "$RESUME"
+        -c "sandbox_mode=\"$([ "$MODE" = write ] && echo workspace-write || echo read-only)\"")
+    else
+      ARGS=(codex exec --sandbox "$([ "$MODE" = write ] && echo workspace-write || echo read-only)")
+    fi
+    ARGS+=(-c 'approval_policy="never"' -c 'web_search="disabled"' -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
+    [ -z "$RESUME" ] && ARGS+=(--cd "$CD")
+    [ -n "$REPORT" ] && ARGS+=(-o "$REPORT")
+    ;;
+  grok)
+    ARGS=("$GROK_BIN")
+    if [ -n "$RESUME" ]; then
+      ARGS+=(-r "$RESUME")   # sandbox はセッションに保存され自動復元(異なる指定はエラー)
+    else
+      ARGS+=(--sandbox "$([ "$MODE" = write ] && echo workspace || echo read-only)")
+    fi
+    ARGS+=(--yolo --no-auto-update --cwd "$CD")
+    [ -n "$EFFORT" ] && ARGS+=(--effort "$EFFORT")
+    [ -n "$MAX_TURNS" ] && ARGS+=(--max-turns "$MAX_TURNS")
+    ARGS+=(--output-format json)
+    ;;
+  agy)
+    # フラグはすべて --print より前。--add-dir は実行 cwd と同じパス。skip-permissions は生成しない
+    ARGS=("$AGY_BIN" --mode "$([ "$MODE" = write ] && echo accept-edits || echo plan)"
+      --sandbox --add-dir "$CD" --model "$MODEL" --print-timeout "${TIMEOUT_MIN}m")
+    [ -n "$RESUME" ] && ARGS+=(--conversation "$RESUME")
+    ;;
+esac
+
+# 表示用コマンド(prompt は cat 形式で表示、実行時は内容を直接渡す)
+shq() { printf '%q' "$1"; }
+CMD_DISPLAY="cd $(shq "$RUN_CWD") && "
+for a in "${ARGS[@]}"; do CMD_DISPLAY+="$(shq "$a") "; done
+case "$CLI" in
+  codex|agy) TAIL_DISPLAY="\"\$(cat $(shq "$PROMPT_FILE"))\"" ;;
+  grok) TAIL_DISPLAY="-p \"\$(cat $(shq "$PROMPT_FILE"))\"" ;;
+esac
+CMD_DISPLAY+="$([ "$CLI" = agy ] && echo "--print ")$TAIL_DISPLAY > $(shq "$LOG_FILE") 2>&1 < /dev/null"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "run_id: $RUN_ID (dry-run: 実行・記録なし)"
+  echo "$CMD_DISPLAY"
+  exit 0
+fi
+
+# ── 実行前 git status ─────────────────────────────────
+git_dirty() { git -C "$CD" status --porcelain 2>/dev/null | wc -l | tr -d ' '; }
+DIRTY_BEFORE="$(git_dirty || echo "")"
+if [ "$MODE" = "write" ] && [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "0" ]; then
+  warn "書き込み委任だが tree が dirty($DIRTY_BEFORE 件)。既存差分はコミット/stash が原則(SKILL.md ベースライン規約)"
+fi
+
+# ── 実行 ──────────────────────────────────────────────
+PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+START_TS=$(date +%s)
+(
+  cd "$RUN_CWD" || exit 97
+  case "$CLI" in
+    grok) "${ARGS[@]}" -p "$PROMPT_CONTENT" ;;
+    agy)  "${ARGS[@]}" --print "$PROMPT_CONTENT" ;;
+    *)    "${ARGS[@]}" "$PROMPT_CONTENT" ;;
+  esac
+) > "$LOG_FILE" 2>&1 < /dev/null
+EXIT_CODE=$?
+DURATION=$(( $(date +%s) - START_TS ))
+DIRTY_AFTER="$(git_dirty || echo "")"
+
+# ── session / conversation ID の取得 ──────────────────
+SESSION_ID=""
+case "$CLI" in
+  codex) SESSION_ID="$(grep -m1 -o 'session id: [0-9a-f-]*' "$LOG_FILE" 2>/dev/null | sed 's/session id: //')"
+         [ -z "$SESSION_ID" ] && [ -n "$RESUME" ] && SESSION_ID="$RESUME" ;;
+  grok)  SESSION_ID="$(grep -m1 -o '"sessionId"[[:space:]]*:[[:space:]]*"[^"]*"' "$LOG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')" ;;
+  agy)   SESSION_ID="$(jq -r --arg d "$CD" '.[$d] // empty' "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" 2>/dev/null)" ;;
+esac
+
+# ── 実行情報 JSONL ────────────────────────────────────
+jq -cn \
+  --arg run_id "$RUN_ID" --arg ts "$(date -u +%FT%TZ)" \
+  --arg cli "$CLI" --arg mode "$MODE" --arg model "$MODEL" --arg effort "$EFFORT" \
+  --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
+  --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
+  --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
+  --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
+  '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,cd:$cd,
+    prompt_file:$prompt_file,log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
+    exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
+    git_dirty_before:$dirty_before,git_dirty_after:$dirty_after,cmd:$cmd}' >> "$RUNS_JSONL"
+
+# ── サマリ ────────────────────────────────────────────
+echo "run_id: $RUN_ID"
+echo "exit_code: $EXIT_CODE (duration: ${DURATION}s)"
+echo "session_id: ${SESSION_ID:-（取得できず — ログを確認）}"
+echo "log: $LOG_FILE"
+[ -n "$REPORT" ] && echo "report: $REPORT"
+if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
+  echo "git: dirty $DIRTY_BEFORE → $DIRTY_AFTER 件(マニフェスト照合を忘れずに)"
+fi
+[ "$MODE" = "readonly" ] && [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ] && \
+  warn "read-only 意図なのに tree が変化した(agy plan は保証でない — diff を確認)"
+echo "評価ログへの記録: jq -cn ... --arg run_id \"$RUN_ID\" ...(SKILL.md「委任ログ」)"
+exit "$EXIT_CODE"
