@@ -1,0 +1,104 @@
+# 事故例・実測記録・ログ見直し(lessons)
+
+**通常の委任では読まない。** CLI が失敗した時に該当 CLI のセクションを、委任ログの見直し時に「ログの見直しと昇格条件」を読む。新しい事故・実測はバージョンと日付を付けてここへ追記する(中核規約 `SKILL.md` には足さない。規約に昇格させるのは繰り返し起きたものだけ)。
+
+## プロセス(設計・指示書・レビューの事故)
+
+- **製品判断の取り違え**: 「リトライを別エンジンで救済」は技術的には正しかったが、生成物(ユーザー可視アウトプット)の見た目が変わる製品判断であり、当日中に撤回になった → ユーザー可視アウトプットが変わる判断は委任前にユーザー確認(`SKILL.md`「製品判断と技術判断」)
+- **現行可視挙動の棚卸し漏れ**: 「レビュー不合格の候補も画面には表示されていた」という現行挙動を確認せずに「不合格=エラー」の意味論を導入し、ユーザーには「生成できなくなった」退行として現れ、復旧に3コミット要した → 既存フロー変更では現行可視挙動を先に列挙(`SKILL.md`「基本フロー」2)
+- **指示書の対象列挙漏れ**: memory 側のフィルタ撤去だけ指示し、postgres 側の同じフィルタを指示書から漏らした。委任先が趣旨を汲んで拾ったが、指示書で保証すべきだった → 複数系統がある機能は「全系統を揃える。系統は全域 grep で洗い出す」を明記(`templates.md`)
+- **ベースライン欠落**: 既存の失敗テストに合わせて生成コストに関わる定数を変更された → 完了条件は「全部パス」ではなく「委任前より失敗を増やさない」
+- **証拠不足の障害修正**: コールドスタート仮説でリトライを実装したが、真因はデプロイ先DBのスキーマ欠落で修正がもう1周必要になった(リトライ自体は無害だったので傷は浅かった)→ 仮説向けの修正は空振りしても害のない最小限に絞る
+- **「前はできていた」の思い込み**: 体感の原因が自分たちの変更による退行だった実例あり → `git show <コミット>:<ファイル>` で症状発生前の実コードを確認し、現行との差分を証拠にする
+- **委任中の外部書き込み**: 委任中に `.grok/settings.json` が変わり `npm run check` が失敗 → 委任先には変更ファイル単位の check で代替させ、lint/git 除外の設定追加(数行)は司令塔が直接処置
+- **原典未確認の提案を鵜呑みにしかけた**: レビュー済み提案に含まれていた `--ask-for-approval` フラグが手元の codex exec には存在せず、鵜呑みにしていたら全委任コマンドが壊れていた → バージョン依存の仕様は実バージョンと照合(`SKILL.md`「Web調査結果の原典確認」)
+- **検証コストゼロ設計の成功例**: 生成ジョブのポーリングUIの検証で、DBの `generation_status` を手で `generating`→`ready` に書き換え、生成APIを一度も叩かずに「生成中表示→ポーリング→完成表示」の全遷移をPlaywrightで確認した。モック・テストレコード作成用のdebugエンドポイント・DB直接更新スクリプトが道具になる
+
+## Codex
+
+### 2026-07 / codex 0.142.5〜0.144.0
+
+- `--ask-for-approval` はトップレベル `codex --help` には存在するが、`codex exec` では unexpected argument(0.142.5)。0.144.0 でも `codex exec --help` に載らないことを確認済み → CLI フラグに依存せず config キー `-c 'approval_policy="never"'` で渡す
+- resume が sandbox・モデル・reasoning effort を引き継がず、ローカル config のデフォルトへ戻ることを実測(0.142.5)→ resume 時も全フラグを付け直す。今後のバージョンでも継承を期待しない
+- stdin 未遮断で「Reading additional input from stdin...」のまま無期限にハング → 末尾 `< /dev/null` 必須
+- `--cd` がリポジトリ外(scratchpad 等)を指すと「Not inside a trusted directory」で即失敗(0.144.0 実測)。`--skip-git-repo-check` での回避はしない
+- web_search の公開 docs 上の値は `disabled|cached|live`。0.142.5 のローカル検証では `indexed` も受理されたが普遍仕様として扱わない
+- code-mode host spawn 失敗(2026-07-10): 「failed to spawn code-mode host /opt/homebrew/bin/codex-code-mode-host」で回答は返るがリポジトリ未読になる。ChatGPT.app 同梱バイナリへの symlink で復旧(手順は `adapters/codex.md`「セットアップ」)。`-c 'features.unified_exec=false'` では回避できない
+- API 向けモデル名(`gpt-5.2-codex` / `gpt-5.5-codex` 等)は ChatGPT アカウントでは 400 エラー(実測)
+- フォアグラウンドで Bash timeout 上限(10分)を超えるとプロセスごと殺され、成果物が中途半端な状態で残る → 大きい委任は run_in_background
+
+## Grok
+
+- 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する
+- `grok models` の1行目に「You are using XAI_API_KEY」が出なければ `~/.zshenv` の `XAI_API_KEY` を確認(PATH は非対話シェルに入らないためフルパス呼び出しも必須)
+- macOS(Seatbelt)ではネットワーク遮断が効かず、sandbox は書き込み保護のみ
+
+## Antigravity
+
+- `--mode plan` でもワークスペースのファイル書き換えとコマンド実行がそのまま通った(実測)→ read-only は「保証」ではなく「意図」。プロンプト側の禁止文+実行後の `git status --short` / `git diff --stat` 確認を必須化
+- `--add-dir` 欠落時、対象ディレクトリは渡らず `~/.gemini/antigravity-cli/scratch` を勝手にワークスペースにしてサイレント続行(実測。エラーにならない)
+- `--print` の直後にフラグを置くとフラグ名自体がプロンプトとして送信され、最初の位置引数より後ろのフラグは全部無視される(実測)。「--mode フラグの解説」のような回答が返ってきたら誤爆のサイン
+- `-c` / `--continue` は「マシン全体で最新の会話」を掴む誤爆(codex の `--last` と同種)→ `--conversation <UUID>` を明示
+- `~/.gemini/antigravity-cli/cache/last_conversations.json` はディレクトリ単位で最新IDに上書きされる → 実行のたびに UUID を控える
+
+## ログの見直しと昇格条件
+
+追記は `SKILL.md`「委任ログ」の `jq -cn` コマンドで行う。このセクションは見直しの時(10の倍数、または「委任ログを見直して」)だけ読む。
+
+### 集計コマンド
+
+cli × model × kind 単位で件数と全判定軸の分布を出す(`SKILL_DIR` はこのスキルのディレクトリ。ログ先の解決は `SKILL.md`「委任ログ」と同じ):
+
+```bash
+set -a; [ -f "$SKILL_DIR/.env" ] && . "$SKILL_DIR/.env"; set +a
+jq -s '
+  sort_by(.cli, .model, .kind) |
+  group_by([.cli, .model, .kind]) |
+  map({
+    cli: .[0].cli, model: .[0].model, kind: .[0].kind, n: length,
+    delegation_verdicts: (group_by(.delegation_verdict) | map({verdict: .[0].delegation_verdict, n: length})),
+    routing_verdicts: (group_by(.routing_verdict) | map({verdict: .[0].routing_verdict, n: length})),
+    outcomes: (group_by(.outcome) | map({outcome: .[0].outcome, n: length})),
+    validations: (group_by(.validation) | map({validation: .[0].validation, n: length})),
+    causes: (group_by(.cause) | map({cause: .[0].cause, n: length}))
+  })
+' "${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}/delegation-log.jsonl"
+```
+
+### ルーティング表・モデル表の更新条件
+
+- 更新してよいのは、**同じ cli/model/kind の組で3件以上あり、かつ `過剰` または `過小` が明確に偏った場合だけ**(全体10件で表を動かすのは早すぎる)
+- `過小` を理由にモデルを上げる判断は、その `過小` が `cause:"model"` で偏っている場合のみ。`routing_verdicts` に `過小` が偏って見えても、`causes` が `instruction`/`spec_change` 寄りなら指示書・設計の問題であり、モデル表は動かさない
+- **委任先の役割分担(provider デフォルト)を見直すのは、`routing_verdict:"委任先ミス"` が3件以上、かつ理由が同じ能力不足である場合だけ**(例: Codex に投げたが毎回 Web 調査不足 / Antigravity に投げたが毎回 write guard 不足 / Grok が大規模 repo 読解で不安定)。現在の provider デフォルトで問題が出ていないなら capability matrix 化は不要
+- 更新時は根拠にしたログ件数を表に注記する
+
+### 自動化の昇格条件(件数ではなく、失敗の種類の偏りで判断する)
+
+30件はあくまで見直し時点であり、自動化のトリガーではない。次の偏りが実際に出た場合だけ、対応する自動化を検討する。
+
+**delegate-run(実行ラッパー)— 2026-07-11 作成済み**
+
+`bin/delegate-run`(テスト: `bin/delegate-run-tests.sh`、実行記録: ログディレクトリの `runs.jsonl`)。ログ30件見直しで条件成立(実委任多数・参照漏れなし・resume の cwd 誤りという「ラッパーが防ぐ類のミス」が実発生)を確認して作成。既知事故をテスト51件に変換済み(dry-run 検証)+ agy Flash Low での実行スモーク確認済み。仕様変更時は adapter を先に直し、テストを追従させる。当初の設計方針(参考のため保持): policy engine にはせず、安全なコマンドランナーに限定する。
+
+- 担当する: provider 別 canonical command の生成 / 必須 sandbox 設定 / prompt file の読み込み / ログ隔離 / `< /dev/null` / timeout 設定 / session・conversation ID の取得 / exit code の記録 / 実行前後の `git status` / 実行情報 JSONL の自動追記(`run_id` を発行し、評価ログ側にも `run_id` を足して関連付ける)
+- 担当しない: 委任すべきかの判断 / provider・モデルの自動選択 / 製品判断 / diff レビュー / validation の合否判定 / 自動コミット / 自動 resume / 自動 handoff
+- 作る時は、このファイルの各 CLI セクションの既知事故をテストケースへ変換する(例: Codex write に workspace-write / approval never / web_search disabled / stdin 遮断が必ず付く、resume で全フラグ付け直し・`--last` 不使用、Grok は sandbox+yolo セット、agy は `--add-dir`=cwd・`--print` 最後・`--dangerously-skip-permissions` を生成しない)。`--dry-run` で shell-escaped command を実行前に確認できるようにする
+
+**指示書 preflight を検討する条件**(いずれかが3件以上)
+
+- `cause:"instruction"` で、同じ必須項目の欠落が繰り返された
+- ベースライン未記載が繰り返された
+- ユーザー可視挙動の棚卸し漏れが繰り返された
+- スコープ外の明記不足が繰り返された
+
+→ 最初は JSON Schema ではなく、`templates.md` の見出し存在チェックから始める(存在検査はできるが中身の正しさまでは保証できない。その限界を明記して使う)
+
+**capability routing(provider マトリクス化)を検討する条件**
+
+- 比較可能な30件程度の中で `routing_verdict:"委任先ミス"` が3件以上偏り、かつ理由が同じ能力不足である場合だけ(上記「更新条件」と同じ基準)
+
+**状態機械・オーケストレーション基盤を検討する条件**(いずれかが起きた場合のみ)
+
+- 複数ユーザーが同じ skill を使う / 同時委任が常態化する / タスクが日数をまたぐ / resume・handoff の追跡漏れが頻発する / 人手を介さず連続実行したい / 監査可能な承認履歴が必要
+
+単一ユーザーが1日数件使う段階では不要。

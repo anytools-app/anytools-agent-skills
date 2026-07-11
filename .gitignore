@@ -1,0 +1,15 @@
+# Local instance configuration (log paths etc.) — copy from .env.example
+skills/delegate/.env
+
+# Session-local Claude Code settings
+.claude/settings.local.json
+
+# Delegation logs must never be committed (may reference private repos/tasks)
+*.jsonl
+*.log
+
+# Skill-local backups
+skills/*/.backup/
+
+# macOS
+.DS_Store
