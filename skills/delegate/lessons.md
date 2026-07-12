@@ -26,6 +26,7 @@
 - code-mode host spawn 失敗(2026-07-10): 「failed to spawn code-mode host /opt/homebrew/bin/codex-code-mode-host」で回答は返るがリポジトリ未読になる。ChatGPT.app 同梱バイナリへの symlink で復旧(手順は `adapters/codex.md`「セットアップ」)。`-c 'features.unified_exec=false'` では回避できない
 - API 向けモデル名(`gpt-5.2-codex` / `gpt-5.5-codex` 等)は ChatGPT アカウントでは 400 エラー(実測)
 - フォアグラウンドで Bash timeout 上限(10分)を超えるとプロセスごと殺され、成果物が中途半端な状態で残る → 大きい委任は run_in_background
+- workspace-write sandbox は**ネットワーク listen も制限**され、dev server・listen を伴うテストは委任先で実行できない(2026-07-12 実測2件。1件は初回納品にバグ残留として顕在化)→ 該当プロジェクトでは指示書に「テスト実施は司令塔で行うので、動く状態にしておくこと」を明記する(`templates.md` 記入時の注意 3)
 
 ## Grok
 
@@ -33,6 +34,7 @@
 - `grok models` の1行目に「You are using XAI_API_KEY」が出なければ `~/.zshenv` の `XAI_API_KEY` を確認(PATH は非対話シェルに入らないためフルパス呼び出しも必須)
 - macOS(Seatbelt)ではネットワーク遮断が効かず、sandbox は書き込み保護のみ
 - 2026-07-12: `grok-4.5` が公式フラッグシップであることを docs.x.ai で確認(「grok-4.20 and newer」の表現どおり 4.20 → 4.5 の順。数字の見た目と新旧が逆)。**CLI 既定は前世代の `grok-4.20-0309-non-reasoning` のまま**なので判断の質が要るタスクは `--model grok-4.5` を明示する。`--model grok-4.5` + `--effort high` の併用を read-only smoke で実測(応答 JSON に `thought` フィールド=reasoning 有効)。同日 delegate-run の grok `--model` 拒否を撤廃し任意透過へ変更。Antigravity が limit の間の大規模読解・独立レビューは grok-4.5(500k context)で代替する
+- `grok-4.20-0309-non-reasoning` のコードレビュー2件(2026-07-12、agy limit 中の代替)で、反証可能な blocker を提出(SELECT を変更と誤認/fail-loud 設計を誤指摘/機構説明の誤り。cause:model、1件破棄・1件一部採用)。着眼(配線・カバレッジ・secrets 残留)は有用 → grok に独立レビューを振る時は `--model grok-4.5` を使い、**blocker は実コードで反証してから採否を決める**。4.5 でのレビュー精度は要再計測
 
 ## Antigravity
 
@@ -41,6 +43,7 @@
 - `--print` の直後にフラグを置くとフラグ名自体がプロンプトとして送信され、最初の位置引数より後ろのフラグは全部無視される(実測)。「--mode フラグの解説」のような回答が返ってきたら誤爆のサイン
 - `-c` / `--continue` は「マシン全体で最新の会話」を掴む誤爆(codex の `--last` と同種)→ `--conversation <UUID>` を明示
 - `~/.gemini/antigravity-cli/cache/last_conversations.json` はディレクトリ単位で最新IDに上書きされる → 実行のたびに UUID を控える
+- 「Individual quota reached」= 個人クォータ到達。リセットまで**約108時間(4.5日)**表示の実測あり(2026-07-12、9秒で失敗・書き込みなし)→ `delegate-run --set-cooldown agy 108h` で記録し、大規模読解・独立レビューは grok-4.5 へ代替(`SKILL.md`「委任先の limit と cooldown」)
 
 ## ログの見直しと昇格条件
 
