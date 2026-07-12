@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-07-12
+
+### Added
+
+- **limit cooldown 機構**: limit・クォータ切れの CLI を「使ってみる→失敗→代替」と毎回試さないための仕組み
+  - `delegate-run --set-cooldown <cli> <期間>` / `--clear-cooldown` / `--cooldowns` で記録・解除・一覧(状態はログディレクトリの `cooldowns.json`。セッション・プロジェクト横断で共有)
+  - cooldown 中の CLI への委任は実行前に拒否し、代替先を案内(`--force` で強行可)
+  - limit パターンを含む失敗(exit≠0)は自動で 1h 記録。exit 0 での検知は警告に留めて判断を司令塔へ残す
+  - SKILL.md「委任先の limit と cooldown」: 代替ルーティング表(agy→grok-4.5 / grok→agy / codex→分割 or Grok workspace)と、代替委任を委任ログへ記録する規約
+  - テスト 57→68 件
+
 ## [0.3.0] - 2026-07-12
 
 ### Added
