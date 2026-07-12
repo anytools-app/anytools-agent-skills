@@ -79,9 +79,12 @@ run "$BIN" --dry-run --cli grok --mode write --cd "$NONGIT" --prompt-file "$PROM
 assert_contains "grok resume: -r"        "-r sess-123"
 assert_not_contains "grok resume: sandbox 非指定" "--sandbox"
 
-# ── Grok: モデル指定は受け付けない(既定 grok-build で使う) ──
-run "$BIN" --dry-run --cli grok --mode readonly --model grok-build --cd "$NONGIT" --prompt-file "$PROMPT"
-assert_exit "grok --model 拒否" 2
+# ── Grok: --model は任意(指定時は透過、未指定は CLI 既定。深い相談・独立レビューは grok-4.5) ──
+run "$BIN" --dry-run --cli grok --mode readonly --model grok-4.5 --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "grok --model 透過 dry-run 成功" 0
+assert_contains "grok --model: 指定時は透過" "--model grok-4.5"
+run "$BIN" --dry-run --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_not_contains "grok --model: 未指定なら付けない" "--model"
 
 # ── agy: フラグは --print より前・--add-dir=cwd・skip-permissions を生成しない ──
 run "$BIN" --dry-run --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" --cd "$NONGIT" --prompt-file "$PROMPT"
