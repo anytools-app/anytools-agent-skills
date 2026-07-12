@@ -76,7 +76,7 @@ case "$CLI" in
     ;;
   grok)
     [ -x "$GROK_BIN" ] || die "grok CLI が見つからない: $GROK_BIN(フルパス呼び出しが前提)"
-    [ -n "$MODEL" ] && die "grok はモデル既定(grok-build)で使う。--model は指定しない"
+    # --model は任意: 未指定は CLI 既定(軽い相談用)、深い相談・独立レビューは grok-4.5(adapters/grok.md のモデル表)
     [ -n "$REPORT" ] && die "-o/--out-report は codex 専用"
     [ -n "$TIMEOUT_MIN" ] && die "--timeout は agy 専用"
     if [ "$MODE" = "write" ] && [ -z "$MAX_TURNS" ]; then MAX_TURNS=40; fi
@@ -119,6 +119,7 @@ case "$CLI" in
       ARGS+=(--sandbox "$([ "$MODE" = write ] && echo workspace || echo read-only)")
     fi
     ARGS+=(--yolo --no-auto-update --cwd "$CD")
+    [ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
     [ -n "$EFFORT" ] && ARGS+=(--effort "$EFFORT")
     [ -n "$MAX_TURNS" ] && ARGS+=(--max-turns "$MAX_TURNS")
     ARGS+=(--output-format json)

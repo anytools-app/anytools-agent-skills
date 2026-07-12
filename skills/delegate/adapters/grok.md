@@ -1,12 +1,23 @@
 # Grok adapter(grok CLI / xAI)
 
-役割: **最新の Web / X 情報が要る調査・相談**(grok は `web_search` / `web_fetch` をデフォルトで使える)、X・コミュニティ・速報色の強い**第三意見**、OpenAI クォータを温存したい read-only 相談。実装委任も可能だが、実装のデフォルトは Codex(技術ドキュメント文脈の第三意見・独立レビューは Antigravity)。
+役割: **最新の Web / X 情報が要る調査・相談**(grok は `web_search` / `web_fetch` をデフォルトで使える)、X・コミュニティ・速報色の強い**第三意見**、OpenAI クォータを温存したい read-only 相談、**Antigravity が limit・障害で使えない時の大規模読解・独立レビューの代替**(`grok-4.5` は 500k context)。実装委任も可能だが、実装のデフォルトは Codex(技術ドキュメント文脈の第三意見・独立レビューは Antigravity)。
 
 ## 呼び出しの前提
 
 - **フルパス `~/.grok/bin/grok` で呼ぶ**(PATH 追加は `.zshrc` のみで、非対話シェルには入らない)
 - 認証は環境変数 `XAI_API_KEY`(`~/.zshenv` で設定済み)で、`grok login` は不要。API 従量課金
-- モデルは既定でよい(2026-07-11 実測の既定: `grok-4.20-0309-non-reasoning`。ラインナップは grok-build 系から grok-4.20 / 4.3 / 4.5 系へ世代交代済み)。一覧は `~/.grok/bin/grok models` で確認し、変わっていたらこの記述を更新する。軽重は `--effort low|medium|high|xhigh` で付ける(現行の non-reasoning 既定モデルでの effort の効きは未再検証)
+- 軽重は `--effort low|medium|high|xhigh` で付ける(`grok-4.5` は reasoning configurable で `--effort` 併用を実測済み。non-reasoning 既定モデルでの effort の効きは未検証)
+
+## モデル表(2026-07-12 改定)
+
+| タスク | モデル |
+|---|---|
+| 軽い相談・要約・定型調査 | 指定なし(CLI 既定。2026-07 実測: `grok-4.20-0309-non-reasoning`) |
+| Web/X 調査、深い相談、独立レビュー、Antigravity 代替の大規模読解 | `--model grok-4.5` |
+
+- `grok-4.5` は公式フラッグシップ(公式 docs 2026-07-12 確認: 「flagship model for code and everything else」「the most intelligent and fastest model we've built」。500k context、$2/$6 per 1M tokens、knowledge cutoff 2026-02-01、configurable reasoning)。**CLI 既定(grok-4.20 系)は前世代のまま**なので、判断の質が要るタスクでは既定に任せず `--model grok-4.5` を明示する(「grok-4.20 and newer」という公式表現のとおり 4.20 → 4.5 の順で、数字の見た目と新旧が逆なことに注意)
+- 一覧は `~/.grok/bin/grok models` で確認し、変わっていたらこの表を更新する
+- resume(`-r`)でモデルがセッションに保存・復元されるかは未検証。resume で継続する場合も元と同じ `--model` を付けて挙動を確認する
 
 ## 相談(read-only)
 
@@ -16,10 +27,12 @@
   --yolo \
   --no-auto-update \
   --cwd <プロジェクトルートの絶対パス> \
+  --model grok-4.5 \
   --effort <low|medium|high|xhigh> \
   --output-format json \
   -p "$(cat <scratchpadの質問ファイル>)" \
   > <scratchpadのログファイル> 2>&1 < /dev/null
+# --model は軽い相談なら省略可(CLI 既定モデルになる。上のモデル表)
 ```
 
 ## 実装委任(workspace write)
@@ -32,6 +45,7 @@ Codex と同一の規律(ベースライン・指示書・マニフェスト照�
   --yolo \
   --no-auto-update \
   --cwd <対象worktreeの絶対パス> \
+  --model grok-4.5 \
   --effort <low|medium|high|xhigh> \
   --max-turns <N> \
   --output-format json \

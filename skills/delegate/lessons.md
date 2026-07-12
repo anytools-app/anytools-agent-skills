@@ -32,6 +32,7 @@
 - 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する(2026-07-11 クレジット購入後に read-only スモークで疎通確認済み: exit 0・2秒・sessionId 取得。同日実測でモデルラインナップが grok-4.20/4.3/4.5 系へ変わり、`--output-format json` の応答構造も `{text, stopReason, sessionId, requestId}` に変化 — `type` フィールド無し。delegate-run の sessionId 抽出はそのまま動作)
 - `grok models` の1行目に「You are using XAI_API_KEY」が出なければ `~/.zshenv` の `XAI_API_KEY` を確認(PATH は非対話シェルに入らないためフルパス呼び出しも必須)
 - macOS(Seatbelt)ではネットワーク遮断が効かず、sandbox は書き込み保護のみ
+- 2026-07-12: `grok-4.5` が公式フラッグシップであることを docs.x.ai で確認(「grok-4.20 and newer」の表現どおり 4.20 → 4.5 の順。数字の見た目と新旧が逆)。**CLI 既定は前世代の `grok-4.20-0309-non-reasoning` のまま**なので判断の質が要るタスクは `--model grok-4.5` を明示する。`--model grok-4.5` + `--effort high` の併用を read-only smoke で実測(応答 JSON に `thought` フィールド=reasoning 有効)。同日 delegate-run の grok `--model` 拒否を撤廃し任意透過へ変更。Antigravity が limit の間の大規模読解・独立レビューは grok-4.5(500k context)で代替する
 
 ## Antigravity
 

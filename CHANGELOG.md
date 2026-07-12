@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-12
+
+### Added
+
+- Grok adapter にモデル表を追加: 軽い相談は CLI 既定、Web/X 調査・深い相談・独立レビュー・Antigravity limit 時の大規模読解代替は `--model grok-4.5`(公式フラッグシップ、500k context、configurable reasoning。docs.x.ai と CLI 実測で確認)
+- Grok の役割に「Antigravity が limit・障害時の大規模読解・独立レビュー代替」を明記
+
+### Changed
+
+- `delegate-run`: grok の `--model` 拒否を撤廃し任意透過に変更(指定時のみ `--model` を付与)。テストを 55→57 件に更新
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
