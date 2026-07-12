@@ -18,7 +18,7 @@
 - Terra は通常実装の主力。複数ファイルという理由だけで Sol に上げず、曖昧さ・影響範囲・退行リスクで判断する
 - Sol は、設計後もなお難しい作業に限定する。Sol を頻繁に使う状態は、モデル不足ではなくタスク分割または指示書の不足を疑う
 - GPT-5.5 の effort と GPT-5.6 の effort に正確な対応関係はない(公式に「no exact mapping」と明記)。旧設定の `high` / `xhigh` をそのまま移植せず、低い effort から試して委任ログで評価する
-- **canary 記録(2026-07-10 開始)**: **Terra・Sol は昇格確定**(2026-07-12 の52件見直し: Terra 実装22件すべて採用・pass・routing適正・scope違反0。Sol は canary 3/3 到達、相談・レビュー計4件で採用中心)。**Luna のみ 1/3 継続** — Luna を使う時だけ note に「GPT-5.6 canary luna n/3」を記録する。昇格・差し戻しの判定は `../lessons.md`「ログの見直しと昇格条件」の更新条件に従う。Luna が弱ければ Terra へ、Terra が過剰なら Luna へ寄せる
+- **canary 記録(2026-07-10 開始)**: **Terra・Sol は昇格確定**(2026-07-12 の58件見直し: Terra 実装**25件すべて採用・pass・routing適正・scope違反0**、`cause:model` は1件のみで過小に至らず。複数案件の SaaS 化実装(P1〜P4c)を Terra 単独で完遂。Sol は canary 3/3 到達、相談・レビュー計4件で採用中心)。**Luna のみ 1/3 継続** — この58件レビューでは実装を全て Terra に振ったため Sol/Luna の実装 canary は未進捗(Terra が盤石なので無理に散らす必要はないが、機械的な作業が来たら Luna を試して 2/3 を埋める)。Luna を使う時だけ note に「GPT-5.6 canary luna n/3」を記録する。昇格・差し戻しの判定は `../lessons.md`「ログの見直しと昇格条件」の更新条件に従う
 - `-m` が「not supported when using Codex with a ChatGPT account」で失敗したら、ユーザーに TUI の `/model` で現行一覧を確認してもらい、この表を更新する
 
 ### GPT-5.6 Sol の max / ultra(例外扱い)

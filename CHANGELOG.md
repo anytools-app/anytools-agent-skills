@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed(76件時点の委任ログ見直し 2026-07-12)
+
+- lessons(Grok): grok-4.5 の再計測完了 — agy cooldown 中の代替レビュー4件+相談1件が全採用・反証 blocker ゼロ。agy 代替の独立レビュー先として実証済み
+- SKILL.md(委任ログ): 独立レビュー指摘の反映 resume は cause に数えない(根因が指示書の誤り・欠落の場合のみ `instruction`)ことを明確化
+
 ### Changed(52件時点の委任ログ見直し 2026-07-12)
 
 - Codex adapter: GPT-5.6 canary を更新 — Terra(実装22件全採用・全pass)に加え Sol も 3/3 で昇格確定。canary 記録の継続は Luna のみ
