@@ -15,6 +15,10 @@
 #   delegate-run --cli grok --mode readonly --effort medium --cd /path/to/repo --prompt-file q.md
 #   resume/継続: --resume <SESSION_ID|CONVERSATION_UUID>(全フラグは自動で付け直される)
 #
+# cooldown(limit を踏んだ CLI を記録し、回復まで実行前に拒否する):
+#   一覧: --cooldowns / 記録: --set-cooldown <cli> <30m|2h> [理由] / 解除: --clear-cooldown <cli>
+#   limit パターンを含む失敗(exit≠0)は自動で 1h 記録される。強行は --force
+#
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
 #
 # ログ保存先: 環境変数 DELEGATE_LOG_DIR > スキル直下の .env > $HOME/.claude/logs/delegate
@@ -33,9 +37,59 @@ AGY_BIN="${ENV_AGY_BIN:-${AGY_BIN:-$HOME/.local/bin/agy}}"
 die() { echo "delegate-run: ERROR: $*" >&2; exit 2; }
 warn() { echo "delegate-run: WARN: $*" >&2; }
 
+# ── cooldown(limit を踏んだ CLI の記録と実行前ゲート)──
+COOLDOWN_FILE="$LOG_DIR/cooldowns.json"
+iso_now() { date -u +%FT%TZ; }
+iso_in() { date -u -v "+${1}S" +%FT%TZ 2>/dev/null || date -u -d "+${1} seconds" +%FT%TZ; }
+duration_secs() {
+  case "$1" in
+    *h) echo $(( ${1%h} * 3600 )) ;;
+    *m) echo $(( ${1%m} * 60 )) ;;
+    *s) echo "${1%s}" ;;
+    *) return 1 ;;
+  esac
+}
+cooldown_set() {  # $1=cli $2=期間(30m/2h) $3=理由
+  local secs; secs="$(duration_secs "$2")" || die "cooldown 期間は 30m / 2h / 90s 形式: $2"
+  mkdir -p "$LOG_DIR"
+  [ -s "$COOLDOWN_FILE" ] || echo '{}' > "$COOLDOWN_FILE"
+  jq --arg c "$1" --arg u "$(iso_in "$secs")" --arg r "$3" --arg ts "$(iso_now)" \
+    '.[$c] = {until:$u, reason:$r, recorded:$ts}' "$COOLDOWN_FILE" > "$COOLDOWN_FILE.tmp" \
+    && mv "$COOLDOWN_FILE.tmp" "$COOLDOWN_FILE"
+  echo "cooldown: $1 を $(jq -r --arg c "$1" '.[$c].until' "$COOLDOWN_FILE") UTC まで記録($3)"
+}
+cooldown_until() {  # $1=cli → 有効な cooldown の until(なし・期限切れは空)
+  [ -s "$COOLDOWN_FILE" ] || return 0
+  local u; u="$(jq -r --arg c "$1" '.[$c].until // empty' "$COOLDOWN_FILE" 2>/dev/null)"
+  [ -n "$u" ] && [ "$(iso_now)" \< "$u" ] && echo "$u"
+  return 0
+}
+
+# ── cooldown 管理コマンド(単独で使う)─────────────────
+case "${1:-}" in
+  --cooldowns)
+    [ -s "$COOLDOWN_FILE" ] || { echo "cooldown の記録なし"; exit 0; }
+    jq -r --arg now "$(iso_now)" \
+      'to_entries[] | "\(.key)\tuntil \(.value.until) UTC \(if .value.until > $now then "[有効]" else "[期限切れ]" end)\t\(.value.reason)"' \
+      "$COOLDOWN_FILE"
+    exit 0 ;;
+  --set-cooldown)
+    [ $# -ge 3 ] || die "使い方: --set-cooldown <codex|grok|agy> <期間 30m/2h> [理由]"
+    case "$2" in codex|grok|agy) ;; *) die "--set-cooldown の CLI は codex|grok|agy" ;; esac
+    cooldown_set "$2" "$3" "${4:-manual}"
+    exit 0 ;;
+  --clear-cooldown)
+    [ $# -ge 2 ] || die "使い方: --clear-cooldown <codex|grok|agy>"
+    if [ -s "$COOLDOWN_FILE" ]; then
+      jq --arg c "$2" 'del(.[$c])' "$COOLDOWN_FILE" > "$COOLDOWN_FILE.tmp" && mv "$COOLDOWN_FILE.tmp" "$COOLDOWN_FILE"
+    fi
+    echo "cooldown: $2 を解除"
+    exit 0 ;;
+esac
+
 # ── 引数 ──────────────────────────────────────────────
 CLI="" MODE="" MODEL="" EFFORT="" CD="" PROMPT_FILE="" REPORT="" RESUME="" LOG_FILE=""
-TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0
+TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli) CLI="${2:?}"; shift 2 ;;
@@ -50,7 +104,8 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT_MIN="${2:?}"; shift 2 ;;
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -89,6 +144,15 @@ case "$CLI" in
     [ -z "$TIMEOUT_MIN" ] && TIMEOUT_MIN=10
     ;;
 esac
+
+# ── cooldown ゲート(limit 記録済みの CLI は実行前に止める)──
+if [ "$FORCE" -eq 0 ]; then
+  CD_UNTIL="$(cooldown_until "$CLI")"
+  if [ -n "$CD_UNTIL" ]; then
+    CD_REASON="$(jq -r --arg c "$CLI" '.[$c].reason // ""' "$COOLDOWN_FILE" 2>/dev/null)"
+    die "$CLI は cooldown 中(until $CD_UNTIL UTC。reason: $CD_REASON)。代替先は SKILL.md「委任先の limit と cooldown」の表を参照。解除済みと分かっている場合のみ --force で強行し、通ったら --clear-cooldown $CLI"
+  fi
+fi
 
 # ── run_id・ログ先 ─────────────────────────────────────
 RUN_ID="run_$(date +%Y%m%d-%H%M%S)_$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
@@ -179,6 +243,18 @@ case "$CLI" in
   agy)   SESSION_ID="$(jq -r --arg d "$CD" '.[$d] // empty' "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" 2>/dev/null)" ;;
 esac
 
+# ── limit 自動検知(確実な失敗のみ自動記録。exit 0 の検知は警告に留め、判断は司令塔)──
+LIMIT_PATTERN='rate.?limit|quota.*(exceed|exhaust)|resource.?exhausted|too many requests|doesn.t have any credits|usage.?limit'
+COOLDOWN_AUTO=""
+if grep -qiE "$LIMIT_PATTERN" "$LOG_FILE" 2>/dev/null; then
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    cooldown_set "$CLI" 1h "auto: limit パターン検知(exit $EXIT_CODE, $RUN_ID)" >/dev/null
+    COOLDOWN_AUTO="recorded"
+  else
+    COOLDOWN_AUTO="suspect"
+  fi
+fi
+
 # ── 実行情報 JSONL ────────────────────────────────────
 jq -cn \
   --arg run_id "$RUN_ID" --arg ts "$(date -u +%FT%TZ)" \
@@ -203,5 +279,9 @@ if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
 fi
 [ "$MODE" = "readonly" ] && [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ] && \
   warn "read-only 意図なのに tree が変化した(agy plan は保証でない — diff を確認)"
+case "$COOLDOWN_AUTO" in
+  recorded) warn "limit パターンを検知し $CLI を 1h の cooldown に記録した。代替先へルーティングする(誤検知なら delegate-run --clear-cooldown $CLI)" ;;
+  suspect)  warn "ログに limit 類似の文字列がある(exit 0 のため自動記録なし)。実際に limit なら delegate-run --set-cooldown $CLI <期間> で記録する" ;;
+esac
 echo "評価ログへの記録: jq -cn ... --arg run_id \"$RUN_ID\" ...(SKILL.md「委任ログ」)"
 exit "$EXIT_CODE"

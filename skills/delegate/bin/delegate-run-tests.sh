@@ -115,6 +115,32 @@ assert_exit "prompt file 不存在エラー" 2
 run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT" --dangerously-bypass-approvals-and-sandbox
 assert_exit "未知引数の拒否" 2
 
+# ── cooldown: 記録 → ゲート拒否 → --force 強行 → 他CLI非影響 → 解除 → 期限切れ無視 ──
+run "$BIN" --set-cooldown grok 30m "test limit"
+assert_exit "cooldown 記録成功" 0
+run "$BIN" --cooldowns
+assert_contains "cooldown 一覧に記録が出る" "grok"
+run "$BIN" --dry-run --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "cooldown 中は実行前に拒否" 2
+assert_contains "cooldown 拒否: 案内表示" "cooldown 中"
+run "$BIN" --dry-run --force --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "cooldown は --force で強行できる" 0
+run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "cooldown は他 CLI に影響しない" 0
+run "$BIN" --clear-cooldown grok
+assert_exit "cooldown 解除成功" 0
+run "$BIN" --dry-run --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "解除後は実行できる" 0
+"$BIN" --set-cooldown grok 30m "expire test" >/dev/null 2>&1
+jq '.grok.until = "2000-01-01T00:00:00Z"' "$DELEGATE_LOG_DIR/cooldowns.json" > "$DELEGATE_LOG_DIR/cooldowns.json.tmp" \
+  && mv "$DELEGATE_LOG_DIR/cooldowns.json.tmp" "$DELEGATE_LOG_DIR/cooldowns.json"
+run "$BIN" --dry-run --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "期限切れ cooldown は無視される" 0
+run "$BIN" --set-cooldown grok bad-duration
+assert_exit "不正な期間形式は拒否" 2
+run "$BIN" --set-cooldown vscode 30m
+assert_exit "未知 CLI の cooldown は拒否" 2
+
 # ── ログ先の解決: 環境変数 > skill 直下の .env > デフォルト ──
 run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_contains "log dir: 環境変数が反映" "$TMP/logs/runs/"

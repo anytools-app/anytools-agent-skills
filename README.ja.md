@@ -105,7 +105,7 @@ skills/delegate/
 ├── templates.md      # 実装指示書・詳細設計ドラフト依頼・独立レビュー依頼
 ├── lessons.md        # 事故例・実測記録・ログ見直しの昇格条件
 ├── bin/
-│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録)
+│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown)
 │   └── delegate-run-tests.sh  # 既知事故を変換した dry-run テスト
 └── .env.example
 ```

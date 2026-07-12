@@ -161,6 +161,22 @@ Claude Code が決めてよい(技術判断):
 - 禁止する変更:
 ```
 
+## 委任先の limit と cooldown
+
+委任先 CLI が limit・クォータ切れで使えないと分かったら、その事実を cooldown として記録し、回復見込みまで再試行しない(**「使ってみる→失敗→代替」を毎回繰り返さない**):
+
+- `delegate-run` は limit パターンを含む失敗(exit≠0)を検知すると**自動で 1h の cooldown を記録する**。exit 0 でパターンだけ見えた場合は警告に留まるので、実際に limit なら `delegate-run --set-cooldown <cli> <期間>` で手動記録する(リセット周期が分かっているならその長さで)
+- **cooldown 中の CLI への委任は delegate-run が実行前に拒否する**。拒否されたら待たずに下の表で代替へルーティングする。確認は `--cooldowns`、解除は `--clear-cooldown <cli>`、解除済みと分かっている場合のみ `--force` で強行し、通ったら `--clear-cooldown` する
+- 状態はログディレクトリの `cooldowns.json` に永続化され、セッション・プロジェクトを跨いで共有される
+
+| limit 中の CLI | 代替 |
+|---|---|
+| Antigravity(大規模読解・独立レビュー) | Grok `--model grok-4.5`(500k context。`adapters/grok.md`) |
+| Grok(Web/X 調査) | Antigravity(Google Search 併用。`adapters/antigravity.md`) |
+| Codex(実装) | 高リスクでなければ Grok workspace 実装(`adapters/grok.md`)。または委任を分割して Claude Code が直接処理、急がなければ回復を待つ |
+
+- 代替先で実行した委任も通常どおり委任ログに記録する(`note` に「本来は X だが cooldown のため代替」と書けば、後の見直しで cooldown 起因の `routing_verdict` を除外できる)
+
 ## 独立レビュー(高リスクで必須・ブラインド)
 
 実装者の自己評価に引っ張られないよう、レビュー担当(実装者とは別モデル。デフォルトは Antigravity の Gemini 系)には客観物だけを渡す。依頼書は `templates.md`「独立レビュー依頼書」。
