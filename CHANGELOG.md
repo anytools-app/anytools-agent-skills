@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed(52件時点の委任ログ見直し 2026-07-12)
+
+- Codex adapter: GPT-5.6 canary を更新 — Terra(実装22件全採用・全pass)に加え Sol も 3/3 で昇格確定。canary 記録の継続は Luna のみ
+- Codex adapter / templates: 相談・設計ドラフト依頼の締め文に「リポジトリの読み取り・検索は積極的に行う」を明記(禁止文言だけ                書くと read-only 過解釈で repo 未読のまま回答される実測への対策)
+- lessons(Codex): workspace-write sandbox の listen 制限で dev server・テストが委任先で実行不能(実測2件)→ 指示書で司令塔実行を明記
+- lessons(Grok): grok-4.20-non-reasoning のコードレビューで反証可能な blocker 提出(2件、cause:model)→ レビューは grok-4.5 を使い、blocker は実コードで反証してから採否
+- lessons(Antigravity): 「Individual quota reached」のリセットは約108時間の実測 → cooldown 108h 推奨
+
 ## [0.4.0] - 2026-07-12
 
 ### Added
