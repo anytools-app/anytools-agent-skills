@@ -34,7 +34,8 @@
 - `grok models` の1行目に「You are using XAI_API_KEY」が出なければ `~/.zshenv` の `XAI_API_KEY` を確認(PATH は非対話シェルに入らないためフルパス呼び出しも必須)
 - macOS(Seatbelt)ではネットワーク遮断が効かず、sandbox は書き込み保護のみ
 - 2026-07-12: `grok-4.5` が公式フラッグシップであることを docs.x.ai で確認(「grok-4.20 and newer」の表現どおり 4.20 → 4.5 の順。数字の見た目と新旧が逆)。**CLI 既定は前世代の `grok-4.20-0309-non-reasoning` のまま**なので判断の質が要るタスクは `--model grok-4.5` を明示する。`--model grok-4.5` + `--effort high` の併用を read-only smoke で実測(応答 JSON に `thought` フィールド=reasoning 有効)。同日 delegate-run の grok `--model` 拒否を撤廃し任意透過へ変更。Antigravity が limit の間の大規模読解・独立レビューは grok-4.5(500k context)で代替する
-- `grok-4.20-0309-non-reasoning` のコードレビュー2件(2026-07-12、agy limit 中の代替)で、反証可能な blocker を提出(SELECT を変更と誤認/fail-loud 設計を誤指摘/機構説明の誤り。cause:model、1件破棄・1件一部採用)。着眼(配線・カバレッジ・secrets 残留)は有用 → grok に独立レビューを振る時は `--model grok-4.5` を使い、**blocker は実コードで反証してから採否を決める**。4.5 でのレビュー精度は要再計測
+- `grok-4.20-0309-non-reasoning` のコードレビュー2件(2026-07-12、agy limit 中の代替)で、反証可能な blocker を提出(SELECT を変更と誤認/fail-loud 設計を誤指摘/機構説明の誤り。cause:model、1件破棄・1件一部採用)。着眼(配線・カバレッジ・secrets 残留)は有用 → grok に独立レビューを振る時は `--model grok-4.5` を使い、**blocker は実コードで反証してから採否を決める**
+- `grok-4.5` の再計測完了(2026-07-12 の76件見直し): agy cooldown 中の代替として独立レビュー4件+相談1件が**全採用・反証 blocker ゼロ**(SQL 忠実性の差分検出、re-enqueue 消失退行の検出など採用率の高い中位指摘)。agy 代替の独立レビュー先として実証済み — 4.20 時代の精度問題は 4.5 では再現していない
 
 ## Antigravity
 
@@ -44,6 +45,15 @@
 - `-c` / `--continue` は「マシン全体で最新の会話」を掴む誤爆(codex の `--last` と同種)→ `--conversation <UUID>` を明示
 - `~/.gemini/antigravity-cli/cache/last_conversations.json` はディレクトリ単位で最新IDに上書きされる → 実行のたびに UUID を控える
 - 「Individual quota reached」= 個人クォータ到達。リセットまで**約108時間(4.5日)**表示の実測あり(2026-07-12、9秒で失敗・書き込みなし)→ `delegate-run --set-cooldown agy 108h` で記録し、大規模読解・独立レビューは grok-4.5 へ代替(`SKILL.md`「委任先の limit と cooldown」)
+
+## Claude サブエージェント(独立レビュー・調査)
+
+- **general-purpose を独立レビュアーとして使う運用が有効(2026-07-12、agy cooldown 中の4件で確立)**: agy が個人クォータ枯渇(108h)の間、high リスク変更(D1互換アダプタ・alarm駆動エンジン・better-auth スキーマ・認証境界・ログイン悪用対策)の独立レビューを Agent ツールの general-purpose(読み取り専用指示)に振り、4件すべて routing 適正・採用。実コード/実 .d.mts を根拠に file:line 付きで指摘し、**全員が見落とした欠陥を単独発見した実績が複数**(alarm 駆動化での 60s バックオフ消失、better-auth の runtime .mjs と .d.mts の食い違い、XFF 詐称でのレート制限回避、Turnstile 公開値ゲートの黙殺無効化)。同期間の grok-4.20 レビュー2件が cause:model(反証可能な blocker)だったのと対照的 → **agy cooldown 中の独立レビューは grok より Claude サブエージェント(general-purpose、読み取り専用+攻撃者視点の指示)を優先する**。依頼書は scratchpad に組み立て(指示書原文+diff+観点)、`git status`/snapshot で書き込みなしを確認する運用は agy と同じ。デフォルトのレビュアー表(SKILL.md)は agy のままで変えない(委任先ミスではないため)— これは cooldown 時の代替の優先順位付け
+- 大規模コードリーディングは Explore、判断を伴う調査は general-purpose/sonnet。返答をパス・行番号・結論に絞らせ、ファイル全文をメイン会話に持ち込まない規律は SKILL.md どおり。3〜4件の調査すべて採用(境界棚卸し・API 実物確認が指示書を一発化した)
+
+## テスト実行の場所(sandbox listen 制限)
+
+- **codex/grok の workspace-write sandbox は 127.0.0.1 の listen を禁止するため、@cloudflare/vitest-pool-workers・next dev・Wrangler ローカル D1 を使うテストは委任先で実行不能(EPERM)。SaaS 化案件の全実装パッケージで再現(委任ログ environment cause 多数)** → このプロジェクトの実装指示書には必ず「テスト実施は司令塔で行う。委任先は typecheck と『動く状態』までで可、テスト実行結果は完了条件にしない」を明記する(`templates.md` の注意3)。委任先の「テスト未実行」報告は失敗ではなく既知の環境制約。司令塔が `npm test` を実行して緑を確認してからコミットする
 
 ## ログの見直しと昇格条件
 
