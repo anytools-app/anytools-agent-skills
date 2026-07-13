@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **wordpress-to-200stack スキル**: WordPress サイトを microCMS + Next.js 静的エクスポートに変換して 200stack にデプロイする移行手順。決定的 CLI「wpkit」(analyze / parse / media / archive / schema gen / import / verify)を `kit/` に同梱(TypeScript、テスト26件)。WXR 分析 → mapping config → 冪等入稿 → デザイン忠実再現(委任規律込み)→ 新旧照合 → 200stack 公開までを4つの品質ゲートで規定。実案件の移行(公開599件・画像7,511点)をパイロットに実データ検証済み
+
 ### Changed(76件時点の委任ログ見直し 2026-07-12)
 
 - lessons(Grok): grok-4.5 の再計測完了 — agy cooldown 中の代替レビュー4件+相談1件が全採用・反証 blocker ゼロ。agy 代替の独立レビュー先として実証済み

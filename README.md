@@ -73,3 +73,8 @@ Logs contain task descriptions of what you delegated, so they are intentionally 
 ## License
 
 [MIT](LICENSE)
+
+## Skills in this repo
+
+- **delegate** — the delegation protocol described above.
+- **wordpress-to-200stack** — migrate a WordPress site to microCMS + Next.js static export and deploy to [200stack](https://www.200stack.com/). Ships with `wpkit`, a deterministic CLI (WXR analyze / parse / media / archive / microCMS schema gen & idempotent import / old-vs-new verify) plus a Next.js skeleton, run through four quality gates. Skill body in Japanese.

@@ -137,3 +137,8 @@ skills/delegate/
 ## ライセンス
 
 [MIT](LICENSE)
+
+## 収録スキル
+
+- **delegate** — 上記の委任プロトコル。
+- **wordpress-to-200stack** — WordPress サイトを microCMS + Next.js 静的エクスポートへ変換し [200stack](https://www.200stack.com/) にデプロイする移行手順。決定的 CLI「wpkit」(WXR 分析 / 中間表現生成 / 画像回収・R2 同期 / サイトアーカイブ / microCMS スキーマ生成・冪等入稿 / 新旧照合)と Next.js スケルトンを同梱し、4つの品質ゲートで進める。
