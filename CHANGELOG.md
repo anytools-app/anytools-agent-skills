@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-07-13
+
+### Added
+
+- **実費(USD)への換算**: トークン数より直感的な「価格」でコストを扱えるように
+  - `delegate-run` が tokens から `cost_usd` を自動計算してサマリ表示+`runs.jsonl` に記録。単体換算は `--estimate-cost <cli> <tokens>`
+  - 実費が発生するのは Grok の従量課金のみ($2.00/1M input 単価による近似。セッション記録に in/out 内訳がないため input 支配的な委任の性質を利用)。codex(ChatGPT サブスク)・agy(個人クォータ)・claude-agent(サブスク)は実費 0
+  - 委任ログに `cost_usd` フィールドを追加。lessons の集計・見直し観点を「実費は cost_usd・クォータ消耗は tokens」の二軸に更新
+  - 単価は `cost_usd()`(bin)と grok adapter に記録し、改定時に両方更新する運用
+  - テスト 72→75 件
+
 ## [0.6.0] - 2026-07-13
 
 ### Added

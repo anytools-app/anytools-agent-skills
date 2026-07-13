@@ -17,6 +17,7 @@
 
 - `grok-4.5` は公式フラッグシップ(公式 docs 2026-07-12 確認: 「flagship model for code and everything else」「the most intelligent and fastest model we've built」。500k context、$2/$6 per 1M tokens、knowledge cutoff 2026-02-01、configurable reasoning)。**CLI 既定(grok-4.20 系)は前世代のまま**なので、判断の質が要るタスクでは既定に任せず `--model grok-4.5` を明示する(「grok-4.20 and newer」という公式表現のとおり 4.20 → 4.5 の順で、数字の見た目と新旧が逆なことに注意)
 - 一覧は `~/.grok/bin/grok models` で確認し、変わっていたらこの表を更新する
+- **実費の目安**: `grok-4.5` は $2.00/1M input・$6.00/1M output(2026-07 docs.x.ai)。grok は3系統で唯一の従量課金なので、delegate-run がセッション total(内訳は取れない)に input 単価を掛けた**近似実費をサマリに出す**。単価改定時は `bin/delegate-run` の `cost_usd()` とこの行を更新する
 - resume(`-r`)でモデルがセッションに保存・復元されるかは未検証。resume で継続する場合も元と同じ `--model` を付けて挙動を確認する
 
 ## 相談(read-only)

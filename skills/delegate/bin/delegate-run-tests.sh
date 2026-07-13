@@ -155,6 +155,14 @@ assert_contains "tokens: grok の total" "- - - 2893"
 run env HOME="$FAKEHOME" "$BIN" --extract-tokens codex no-such-session
 assert_exit "tokens: セッション不在でもエラーにしない" 0
 
+# ── コスト換算: grok のみ実費(input 単価近似)、サブスク・クォータ内は 0 ──
+run "$BIN" --estimate-cost grok 1000000
+assert_contains "cost: grok 1M tokens = \$2.00" "2.0000"
+run "$BIN" --estimate-cost codex 5000000
+assert_contains "cost: codex は実費 0" "0"
+run "$BIN" --estimate-cost grok not-a-number
+assert_exit "cost: 非数値でもエラーにしない" 0
+
 # ── ログ先の解決: 環境変数 > skill 直下の .env > デフォルト ──
 run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_contains "log dir: 環境変数が反映" "$TMP/logs/runs/"
