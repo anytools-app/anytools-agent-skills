@@ -260,9 +260,10 @@ jq -cn \
   --arg cause "<model|instruction|spec_change|environment|tooling|product_decision|unknown>" \
   --arg note "<判定理由1行>" \
   --arg run_id "<delegate-run の run_id/なし>" \
+  --arg tokens "<総トークン数/不明なら空>" \
   --argjson resumes <回数> \
   --argjson scope_violation <true|false> \
-  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id}' \
+  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id,tokens:($tokens|tonumber? // null)}' \
   >> "$LOG_DIR/delegation-log.jsonl"
 ```
 
@@ -270,6 +271,7 @@ jq -cn \
 - `outcome` は成果物の最終処遇、`validation` は**委任成果物をレビューした時点**の検証結果(ベースラインに既存失敗がある場合、新規失敗ゼロなら `no_new_failures`)。Claude Code の軽微修正後に結果が変わった場合は最終結果を入れつつ、`note` に「軽微修正後pass」等と明記する(委任先が一発で通したように見せない)
 - `未完了` は**ユーザー都合・仕様変更・作業中断など、委任先や環境の失敗ではない理由**に限る。CLIエラー・認証エラー・timeout・権限詰まりは `失敗`(+ `validation:"not_run"`、`cause` に `tooling|environment|unknown` 等)
 - **手戻りの起因は `cause` で構造化する**(値と処置は「修正・再委任の上限」の表)。resume が多くても `cause` が `instruction` や `spec_change` ならモデル評価に使わない。`routing_verdict:"過小"` の根拠にできるのは `cause:"model"`(指示の誤解・雑な実装・虚偽の完了報告)だけ。**独立レビューの指摘を反映するための resume は正常工程であり、それ自体は cause に数えない**(指摘の根因が指示書の誤り・欠落である場合のみ `instruction`。76件見直しでレビュー反映 resume が `instruction` に混ざり指示書品質のシグナルが濁った実例あり)
+- **`tokens` は委任1件の総トークン数**(resume 分も含むセッション累計)。codex / grok は delegate-run のサマリに出る total を転記する。claude-agent は Agent ツール実行後に表示される usage から。取れない場合は空のまま(null になる)— コスト効率の見直しに使う(`lessons.md`「ログの見直しと昇格条件」)
 - `cli:"claude-agent"` は設計前の本格的なコードリーディング委任(Explore 等に数分規模で振ったもの)を対象とし、軽い単発検索は記録しない
 - 相談の判定材料は回答の質(原典確認で嘘が見つかったか、提案が採用に耐えたか)
 - 追記時に `wc -l` で件数を確認し、**10の倍数でユーザーに集計・見直しを提案する**(「委任ログを見直して」でも随時)。集計コマンド、ルーティング表・モデル表の更新条件、自動化の昇格条件は `lessons.md`「ログの見直しと昇格条件」

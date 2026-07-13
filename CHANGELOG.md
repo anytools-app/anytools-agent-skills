@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-07-13
+
+### Added
+
+- **トークン使用量の計測**: 委任のコスト効率をデータで見直せるようにする仕組み
+  - `delegate-run` が実行後に codex(セッション JSONL の `token_count`)/ grok(`signals.json` の `contextTokensUsed`)からトークン使用量を自動抽出し、サマリ表示+`runs.jsonl` に記録(`tokens_total` / `tokens_detail`)。単体取得は `--extract-tokens <cli> <SESSION_ID>`。agy は保存形式が SQLite のため未対応
+  - 委任ログ(delegation-log.jsonl)に `tokens` フィールドを追加(総トークン数。claude-agent は Agent ツールの usage 表示から転記)
+  - lessons「ログの見直し」にトークン効率の集計コマンドと見直し観点を追加: 同種タスクで品質が同等なら tokens の低いティアへ寄せる。3件未満の組では動かさない
+  - テスト 68→72 件
+
 ## [0.5.0] - 2026-07-13
 
 ### Changed

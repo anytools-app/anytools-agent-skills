@@ -141,6 +141,20 @@ assert_exit "不正な期間形式は拒否" 2
 run "$BIN" --set-cooldown vscode 30m
 assert_exit "未知 CLI の cooldown は拒否" 2
 
+# ── トークン抽出: codex / grok のセッション記録から(fake HOME で検証)──
+FAKEHOME="$TMP/home"
+mkdir -p "$FAKEHOME/.codex/sessions/2026/07/13" "$FAKEHOME/.grok/sessions/%2Ftmp%2Fx/sess-tok-1"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}' \
+  > "$FAKEHOME/.codex/sessions/2026/07/13/rollout-2026-07-13T00-00-00-tok-abc.jsonl"
+run env HOME="$FAKEHOME" "$BIN" --extract-tokens codex tok-abc
+assert_exit "tokens: codex 抽出成功" 0
+assert_contains "tokens: codex の in/cached/out/total" "100 40 20 120"
+echo '{"contextTokensUsed":2893,"contextWindowTokens":256000}' > "$FAKEHOME/.grok/sessions/%2Ftmp%2Fx/sess-tok-1/signals.json"
+run env HOME="$FAKEHOME" "$BIN" --extract-tokens grok sess-tok-1
+assert_contains "tokens: grok の total" "- - - 2893"
+run env HOME="$FAKEHOME" "$BIN" --extract-tokens codex no-such-session
+assert_exit "tokens: セッション不在でもエラーにしない" 0
+
 # ── ログ先の解決: 環境変数 > skill 直下の .env > デフォルト ──
 run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_contains "log dir: 環境変数が反映" "$TMP/logs/runs/"
