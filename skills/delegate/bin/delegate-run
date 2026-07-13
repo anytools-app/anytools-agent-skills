@@ -19,6 +19,9 @@
 #   一覧: --cooldowns / 記録: --set-cooldown <cli> <30m|2h> [理由] / 解除: --clear-cooldown <cli>
 #   limit パターンを含む失敗(exit≠0)は自動で 1h 記録される。強行は --force
 #
+# トークン使用量: 実行後に codex / grok のセッション記録から自動抽出し runs.jsonl とサマリに出す。
+#   単体取得: --extract-tokens <codex|grok> <SESSION_ID>(出力: "in cached out total")
+#
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
 #
 # ログ保存先: 環境変数 DELEGATE_LOG_DIR > スキル直下の .env > $HOME/.claude/logs/delegate
@@ -65,6 +68,27 @@ cooldown_until() {  # $1=cli → 有効な cooldown の until(なし・期限切
   return 0
 }
 
+# ── トークン使用量の抽出(取れる CLI のみ。agy は保存形式が SQLite のため未対応)──
+extract_tokens() {  # $1=cli $2=session_id → "in cached out total"(取れなければ出力なし)
+  [ -n "${2:-}" ] || return 0
+  local f
+  case "$1" in
+    codex)
+      f="$(ls -t "$HOME/.codex/sessions"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -1)"
+      [ -n "$f" ] && jq -rs \
+        '[.[] | select(.type == "event_msg" and (.payload.type? == "token_count"))] | last
+         | .payload.info.total_token_usage | select(. != null)
+         | "\(.input_tokens // "-") \(.cached_input_tokens // "-") \(.output_tokens // "-") \(.total_tokens // "-")"' \
+        "$f" 2>/dev/null
+      ;;
+    grok)
+      f="$(ls -d "$HOME/.grok/sessions"/*/"$2"/signals.json 2>/dev/null | head -1)"
+      [ -n "$f" ] && jq -r 'select(.contextTokensUsed != null) | "- - - \(.contextTokensUsed)"' "$f" 2>/dev/null
+      ;;
+  esac
+  return 0
+}
+
 # ── cooldown 管理コマンド(単独で使う)─────────────────
 case "${1:-}" in
   --cooldowns)
@@ -84,6 +108,10 @@ case "${1:-}" in
       jq --arg c "$2" 'del(.[$c])' "$COOLDOWN_FILE" > "$COOLDOWN_FILE.tmp" && mv "$COOLDOWN_FILE.tmp" "$COOLDOWN_FILE"
     fi
     echo "cooldown: $2 を解除"
+    exit 0 ;;
+  --extract-tokens)
+    [ $# -ge 3 ] || die "使い方: --extract-tokens <codex|grok> <SESSION_ID>"
+    extract_tokens "$2" "$3"
     exit 0 ;;
 esac
 
@@ -105,7 +133,7 @@ while [ $# -gt 0 ]; do
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -243,6 +271,11 @@ case "$CLI" in
   agy)   SESSION_ID="$(jq -r --arg d "$CD" '.[$d] // empty' "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" 2>/dev/null)" ;;
 esac
 
+# ── トークン使用量(コスト見直しの材料。委任ログの tokens にはこの total を転記する)──
+TOKENS="$(extract_tokens "$CLI" "$SESSION_ID")"
+TOK_TOTAL=""
+[ -n "$TOKENS" ] && TOK_TOTAL="${TOKENS##* }"
+
 # ── limit 自動検知(確実な失敗のみ自動記録。exit 0 の検知は警告に留め、判断は司令塔)──
 LIMIT_PATTERN='rate.?limit|quota.*(exceed|exhaust)|resource.?exhausted|too many requests|doesn.t have any credits|usage.?limit'
 COOLDOWN_AUTO=""
@@ -262,16 +295,19 @@ jq -cn \
   --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
+  --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
   '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,cd:$cd,
     prompt_file:$prompt_file,log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
+    tokens_total:($tokens_total|tonumber? // null),tokens_detail:$tokens_detail,
     git_dirty_before:$dirty_before,git_dirty_after:$dirty_after,cmd:$cmd}' >> "$RUNS_JSONL"
 
 # ── サマリ ────────────────────────────────────────────
 echo "run_id: $RUN_ID"
 echo "exit_code: $EXIT_CODE (duration: ${DURATION}s)"
 echo "session_id: ${SESSION_ID:-（取得できず — ログを確認）}"
+[ -n "$TOKENS" ] && echo "tokens: $TOKENS (in cached out total — 委任ログの tokens には total を記録)"
 echo "log: $LOG_FILE"
 [ -n "$REPORT" ] && echo "report: $REPORT"
 if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
