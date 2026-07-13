@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-07-13
+
+### Changed
+
+- **コスト換算をサブスク按分方式に変更**: サブスク・定額プランも固定費として費用に反映する。単価(USD per 1M tokens)は `.env` の `COST_PER_MTOK_{GROK,CODEX,AGY,CLAUDE_AGENT}` で設定し、サブスク勢は「月額 USD ÷ 月間総トークン(百万)」の按分単価を書く(契約・使用量に依存する社内情報のためリポジトリには置かない。grok のみ API 公開単価 2.00 を既定に持つ)
+- 単価未設定の CLI は cost_usd を出さず、サマリで設定方法を案内
+- `--estimate-cost` が claude-agent に対応(Agent ツールの usage 表示を委任ログの cost_usd へ換算する用)
+- lessons: 按分単価の分母(月間総トークン)はログ見直しの節目で実測し直して `.env` を更新する運用を明記(codex の実測手順付き)
+- テスト 75→78 件
+
 ## [0.7.0] - 2026-07-13
 
 ### Added

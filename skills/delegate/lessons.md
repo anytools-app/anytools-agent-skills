@@ -97,7 +97,7 @@ jq -s '[.[] | select(.tokens != null)] | group_by([.cli, .model, .kind]) |
 - `過小` を理由にモデルを上げる判断は、その `過小` が `cause:"model"` で偏っている場合のみ。`routing_verdicts` に `過小` が偏って見えても、`causes` が `instruction`/`spec_change` 寄りなら指示書・設計の問題であり、モデル表は動かさない
 - **委任先の役割分担(provider デフォルト)を見直すのは、`routing_verdict:"委任先ミス"` が3件以上、かつ理由が同じ能力不足である場合だけ**(例: Codex に投げたが毎回 Web 調査不足 / Antigravity に投げたが毎回 write guard 不足 / Grok が大規模 repo 読解で不安定)。現在の provider デフォルトで問題が出ていないなら capability matrix 化は不要
 - 更新時は根拠にしたログ件数を表に注記する
-- **コスト効率の見直し(二軸)**: 実費は `cost_usd`(現状は Grok の従量課金のみ発生し、codex・agy・claude-agent はサブスク・クォータ内で 0)、クォータ消耗・レート制限は `tokens` で見る。同種のタスク(kind × リスク帯)でモデル・effort 別の分布を比較し、品質(outcome / validation / resumes)が同等で消費が明確に低いティアがあるなら、そちらへ寄せる。resume が嵩む委任は消費も嵩む — 指示書の分割・スコープ明確化はコスト面からも評価する。判断材料が3件未満の組では動かさない(モデル表と同じ規律)
+- **コスト効率の見直し(二軸)**: 費用は `cost_usd`(grok は API 実単価、サブスク・定額勢は月額按分 — 単価は `.env` の `COST_PER_MTOK_*` が正)、クォータ消耗・レート制限は `tokens` で見る。同種のタスク(kind × リスク帯)でモデル・effort 別の分布を比較し、品質(outcome / validation / resumes)が同等で消費が明確に低いティアがあるなら、そちらへ寄せる。resume が嵩む委任は消費も嵩む — 指示書の分割・スコープ明確化はコスト面からも評価する。判断材料が3件未満の組では動かさない(モデル表と同じ規律)。**按分単価の分母(月間総トークン)は使用量で変わる — ログ見直しの節目で実測し直して `.env` を更新する**(codex の実測: `~/.codex/sessions/<YYYY>/<MM>` の token_count 集計)
 
 ### 自動化の昇格条件(件数ではなく、失敗の種類の偏りで判断する)
 
