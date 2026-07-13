@@ -28,7 +28,8 @@ Claude Code が司令塔として設計・指示書・レビュー・採否・�
 |---|---|
 | 通常実装 | Codex |
 | Web/X・速報系の調査、コミュニティ色の強い第三意見 | Grok |
-| 大規模読解、Google検索付きドキュメント調査、独立レビュー、技術文脈の第三意見 | Antigravity(Gemini) |
+| 大規模読解、Google検索付きドキュメント調査、技術文脈の第三意見 | Antigravity(Gemini) |
+| 独立レビュー | Antigravity / Claude サブエージェント / Grok の**持ち回り**(下記「独立レビュー」) |
 | 設計前の安価なコードリーディング・広い探索 | Claude サブエージェント |
 | 最終設計、製品判断、採否、コミット | Claude Code(委任しない) |
 
@@ -171,7 +172,8 @@ Claude Code が決めてよい(技術判断):
 
 | limit 中の CLI | 代替 |
 |---|---|
-| Antigravity(大規模読解・独立レビュー) | Grok `--model grok-4.5`(500k context。`adapters/grok.md`) |
+| Antigravity(大規模読解) | Grok `--model grok-4.5`(500k context。`adapters/grok.md`) |
+| Antigravity / Grok(独立レビュー) | 持ち回りの残り系統へ(「独立レビュー」。Claude サブエージェントは limit しない) |
 | Grok(Web/X 調査) | Antigravity(Google Search 併用。`adapters/antigravity.md`) |
 | Codex(実装) | 高リスクでなければ Grok workspace 実装(`adapters/grok.md`)。または委任を分割して Claude Code が直接処理、急がなければ回復を待つ |
 
@@ -179,7 +181,18 @@ Claude Code が決めてよい(技術判断):
 
 ## 独立レビュー(高リスクで必須・ブラインド)
 
-実装者の自己評価に引っ張られないよう、レビュー担当(実装者とは別モデル。デフォルトは Antigravity の Gemini 系)には客観物だけを渡す。依頼書は `templates.md`「独立レビュー依頼書」。
+実装者の自己評価に引っ張られないよう、レビュー担当(実装者とは別モデル)には客観物だけを渡す。依頼書は `templates.md`「独立レビュー依頼書」。
+
+**担当は3系統を均等に使う(持ち回り)**: Antigravity(Gemini)/ Claude サブエージェント / Grok(`--model grok-4.5`)。コスト構造(Grok は API 従量課金の実費、Antigravity は個人クォータ、Claude サブエージェントはサブスクリプション内)とクォータ消耗を分散し、レビュー視点の多様性も保つ。
+
+- 選ぶ前にログディレクトリの `delegation-log.jsonl` で直近のレビュー担当を確認し、**最も使っていない系統**を選ぶ(cooldown 中の系統は飛ばして次へ):
+
+```bash
+tail -30 "$LOG_DIR/delegation-log.jsonl" | jq -r 'select(.kind == "レビュー") | .cli' | sort | uniq -c
+```
+
+- **例外(品質優先)**: 認証・権限・課金・DB移行・セキュリティなど高リスクの独立レビューは、司令塔(Claude)と同系になる Claude サブエージェントを避け、異系統(Antigravity / Grok)を優先する — 同系レビューは司令塔の思い込みを再生産しやすい
+- Claude サブエージェントでレビューする場合: Agent ツールの読み取り専用サブエージェントに「独立レビュー依頼書」の内容**だけ**を渡す(サブエージェントには会話コンテキストが渡らないため、ブラインドは自然に成立する)。model は sonnet を基本、複雑な変更は司令塔と同等モデル。委任ログには `cli:"claude-agent"`・`kind:"レビュー"` で記録する
 
 先に渡すもの:
 

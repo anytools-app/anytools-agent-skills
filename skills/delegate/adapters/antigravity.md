@@ -1,6 +1,6 @@
 # Antigravity adapter(agy CLI / Google)
 
-役割: **大きなコードベースの構造把握・横断的な依存調査**(広い文脈を渡す読解)、**Google Search を併用した公式ドキュメント調査**(ヘッドレスでも web 検索を使うことを実測済み。特に Google Cloud / Firebase / Android / Gemini API 周辺)、**実装成果物の独立レビュー**(仕様逸脱・副作用・テスト不足を別モデル視点で洗う)、技術文脈の**第三意見**(X/速報文脈なら Grok)、OpenAI / xAI クォータを温存したい read-only 相談、隔離 worktree での比較実装。実装のデフォルトにはしない。
+役割: **大きなコードベースの構造把握・横断的な依存調査**(広い文脈を渡す読解)、**Google Search を併用した公式ドキュメント調査**(ヘッドレスでも web 検索を使うことを実測済み。特に Google Cloud / Firebase / Android / Gemini API 周辺)、**独立レビューの持ち回り担当の一角**(仕様逸脱・副作用・テスト不足を別モデル視点で洗う — 担当の選び方は `SKILL.md`「独立レビュー」)、技術文脈の**第三意見**(X/速報文脈なら Grok)、OpenAI / xAI クォータを温存したい read-only 相談、隔離 worktree での比較実装。実装のデフォルトにはしない。
 
 ## モデル表(2026-07 実測)
 
