@@ -3,10 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-13
 
 ### Changed
 
+- **独立レビューを3系統の持ち回りに変更**: Antigravity(Gemini)/ Claude サブエージェント / Grok(grok-4.5)を均等に使う(コスト構造とクォータ消耗の分散、レビュー視点の多様化)。選ぶ前に委任ログで直近のレビュー担当を確認し、最も使っていない系統を選ぶ。高リスク変更のレビューは司令塔と同系の Claude サブエージェントを避け、異系統を優先
+- Codex adapter: GPT-5.6 canary 完了(119件見直しで Terra 62/64・Sol 3/3・Luna 3/3 の全ティア昇格確定)
+- lessons(Codex): 「model at capacity」はサーバ側の一時飽和でアカウント limit と区別する(cooldown せずフォールバック表の旧モデルで続行)
 - README をスキルごとに分割: ルートの README / README.ja はスキル一覧のインデックスになり、詳細は `skills/delegate/README(.ja).md` と `skills/wordpress-to-200stack/README.md` へ移動
 - plugin / marketplace マニフェストの description を複数スキルパック前提に更新
 

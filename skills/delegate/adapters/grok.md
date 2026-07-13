@@ -1,6 +1,6 @@
 # Grok adapter(grok CLI / xAI)
 
-役割: **最新の Web / X 情報が要る調査・相談**(grok は `web_search` / `web_fetch` をデフォルトで使える)、X・コミュニティ・速報色の強い**第三意見**、OpenAI クォータを温存したい read-only 相談、**Antigravity が limit・障害で使えない時の大規模読解・独立レビューの代替**(`grok-4.5` は 500k context)。実装委任も可能だが、実装のデフォルトは Codex(技術ドキュメント文脈の第三意見・独立レビューは Antigravity)。
+役割: **最新の Web / X 情報が要る調査・相談**(grok は `web_search` / `web_fetch` をデフォルトで使える)、X・コミュニティ・速報色の強い**第三意見**、**独立レビューの持ち回り担当の一角**(`--model grok-4.5`。API 従量課金の実費がかかるため独占させない — `SKILL.md`「独立レビュー」)、OpenAI クォータを温存したい read-only 相談、**Antigravity が limit・障害時の大規模読解の代替**(`grok-4.5` は 500k context)。実装委任も可能だが、実装のデフォルトは Codex。
 
 ## 呼び出しの前提
 
