@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- README をスキルごとに分割: ルートの README / README.ja はスキル一覧のインデックスになり、詳細は `skills/delegate/README(.ja).md` と `skills/wordpress-to-200stack/README.md` へ移動
+- plugin / marketplace マニフェストの description を複数スキルパック前提に更新
+
 ### Added
 
 - **wordpress-to-200stack スキル**: WordPress サイトを microCMS + Next.js 静的エクスポートに変換して 200stack にデプロイする移行手順。決定的 CLI「wpkit」(analyze / parse / media / archive / schema gen / import / verify)を `kit/` に同梱(TypeScript、テスト26件)。WXR 分析 → mapping config → 冪等入稿 → デザイン忠実再現(委任規律込み)→ 新旧照合 → 200stack 公開までを4つの品質ゲートで規定。実案件の移行(公開599件・画像7,511点)をパイロットに実データ検証済み
