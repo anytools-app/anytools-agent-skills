@@ -91,17 +91,21 @@ extract_tokens() {  # $1=cli $2=session_id → "in cached out total"(取れな�
   return 0
 }
 
-# ── コスト換算(実費 USD。単価改定時はここと adapters/grok.md を更新)──
-# grok: API 従量課金。セッション記録は total のみで in/out 内訳が取れないため、
-#   input 単価($2.00/1M、grok-4.5、2026-07 docs.x.ai)で近似する(委任は input 支配的。
-#   4.20 系の公式単価は未掲載のため同単価で過大側に近似)
-# codex(ChatGPT サブスク)/ agy(個人クォータ)/ claude-agent(サブスク)は実費 0
-cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(換算できなければ空)
+# ── コスト換算(USD)──
+# 単価(USD per 1M tokens)は .env の COST_PER_MTOK_* で設定する:
+#   grok: API 従量課金の実単価(既定 2.00 = grok-4.5 input 単価。in/out 内訳が取れないため input 近似)
+#   codex / agy / claude-agent: サブスク・定額プランの按分単価(= 月額 USD ÷ 月間総トークン[百万])。
+#     契約・使用量に依存する値のためリポジトリに既定値を置かない — 未設定なら換算しない
+cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(単価未設定・非数値なら出力なし)
   case "${2:-}" in ''|*[!0-9]*) return 0 ;; esac
+  local rate=""
   case "$1" in
-    grok) awk -v t="$2" 'BEGIN{printf "%.4f", t * 2.00 / 1000000}' ;;
-    codex|agy) echo "0" ;;
+    grok)         rate="${COST_PER_MTOK_GROK:-2.00}" ;;
+    codex)        rate="${COST_PER_MTOK_CODEX:-}" ;;
+    agy)          rate="${COST_PER_MTOK_AGY:-}" ;;
+    claude-agent) rate="${COST_PER_MTOK_CLAUDE_AGENT:-}" ;;
   esac
+  [ -n "$rate" ] && awk -v t="$2" -v r="$rate" 'BEGIN{printf "%.4f", t * r / 1000000}'
   return 0
 }
 
@@ -130,7 +134,7 @@ case "${1:-}" in
     extract_tokens "$2" "$3"
     exit 0 ;;
   --estimate-cost)
-    [ $# -ge 3 ] || die "使い方: --estimate-cost <codex|grok|agy> <tokens_total>"
+    [ $# -ge 3 ] || die "使い方: --estimate-cost <codex|grok|agy|claude-agent> <tokens_total>"
     cost_usd "$2" "$3"
     exit 0 ;;
 esac
@@ -332,9 +336,11 @@ echo "session_id: ${SESSION_ID:-（取得できず — ログを確認）}"
 [ -n "$TOKENS" ] && echo "tokens: $TOKENS (in cached out total — 委任ログには total と cost_usd を記録)"
 if [ -n "$COST_USD" ]; then
   case "$CLI" in
-    grok) echo "cost: \$$COST_USD USD(input 単価による近似・実費)" ;;
-    *)    echo "cost: \$0(サブスク・クォータ内 — 実費なし。消費の把握は tokens で)" ;;
+    grok) echo "cost: \$$COST_USD USD(API 従量・input 単価近似)" ;;
+    *)    echo "cost: \$$COST_USD USD(サブスク月額の按分単価による換算)" ;;
   esac
+elif [ -n "$TOK_TOTAL" ]; then
+  echo "cost: 単価未設定 — .env の COST_PER_MTOK_$(echo "$CLI" | tr '[:lower:]-' '[:upper:]_') に「月額USD ÷ 月間総トークン(百万)」を設定すると換算される"
 fi
 echo "log: $LOG_FILE"
 [ -n "$REPORT" ] && echo "report: $REPORT"
