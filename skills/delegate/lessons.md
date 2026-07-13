@@ -27,6 +27,7 @@
 - API 向けモデル名(`gpt-5.2-codex` / `gpt-5.5-codex` 等)は ChatGPT アカウントでは 400 エラー(実測)
 - フォアグラウンドで Bash timeout 上限(10分)を超えるとプロセスごと殺され、成果物が中途半端な状態で残る → 大きい委任は run_in_background
 - workspace-write sandbox は**ネットワーク listen も制限**され、dev server・listen を伴うテストは委任先で実行できない(2026-07-12 実測2件。1件は初回納品にバグ残留として顕在化)→ 該当プロジェクトでは指示書に「テスト実施は司令塔で行うので、動く状態にしておくこと」を明記する(`templates.md` 記入時の注意 3)
+- **「model at capacity」はサーバ側の一時飽和で、アカウントの limit ではない** → cooldown を記録せず、フォールバック表の旧モデル(Terra なら `gpt-5.4`)へ明示的に切り替えて続行する(2026-07-13 実測: capacity で即失敗 → gpt-5.4 で一発成功。委任ログの model には実際に使ったモデルを記録)
 
 ## Grok
 
