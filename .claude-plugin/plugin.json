@@ -7,5 +7,18 @@
   },
   "homepage": "https://github.com/anytools-app/anytools-agent-skills",
   "license": "MIT",
-  "keywords": ["delegation", "codex", "grok", "antigravity", "multi-agent", "orchestration"]
+  "keywords": [
+    "200stack",
+    "antigravity",
+    "codex",
+    "delegation",
+    "grok",
+    "microcms",
+    "migration",
+    "multi-agent",
+    "nextjs",
+    "orchestration",
+    "static-site",
+    "wordpress"
+  ]
 }
