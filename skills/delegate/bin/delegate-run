@@ -21,6 +21,8 @@
 #
 # トークン使用量: 実行後に codex / grok のセッション記録から自動抽出し runs.jsonl とサマリに出す。
 #   単体取得: --extract-tokens <codex|grok> <SESSION_ID>(出力: "in cached out total")
+# コスト換算(実費 USD): grok のみ従量課金(input 単価で近似)。codex/agy はサブスク・クォータ内で実費 0。
+#   単体換算: --estimate-cost <cli> <tokens>(単価改定時は cost_usd() の単価を更新)
 #
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
 #
@@ -89,6 +91,20 @@ extract_tokens() {  # $1=cli $2=session_id → "in cached out total"(取れな�
   return 0
 }
 
+# ── コスト換算(実費 USD。単価改定時はここと adapters/grok.md を更新)──
+# grok: API 従量課金。セッション記録は total のみで in/out 内訳が取れないため、
+#   input 単価($2.00/1M、grok-4.5、2026-07 docs.x.ai)で近似する(委任は input 支配的。
+#   4.20 系の公式単価は未掲載のため同単価で過大側に近似)
+# codex(ChatGPT サブスク)/ agy(個人クォータ)/ claude-agent(サブスク)は実費 0
+cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(換算できなければ空)
+  case "${2:-}" in ''|*[!0-9]*) return 0 ;; esac
+  case "$1" in
+    grok) awk -v t="$2" 'BEGIN{printf "%.4f", t * 2.00 / 1000000}' ;;
+    codex|agy) echo "0" ;;
+  esac
+  return 0
+}
+
 # ── cooldown 管理コマンド(単独で使う)─────────────────
 case "${1:-}" in
   --cooldowns)
@@ -113,6 +129,10 @@ case "${1:-}" in
     [ $# -ge 3 ] || die "使い方: --extract-tokens <codex|grok> <SESSION_ID>"
     extract_tokens "$2" "$3"
     exit 0 ;;
+  --estimate-cost)
+    [ $# -ge 3 ] || die "使い方: --estimate-cost <codex|grok|agy> <tokens_total>"
+    cost_usd "$2" "$3"
+    exit 0 ;;
 esac
 
 # ── 引数 ──────────────────────────────────────────────
@@ -133,7 +153,7 @@ while [ $# -gt 0 ]; do
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -271,10 +291,11 @@ case "$CLI" in
   agy)   SESSION_ID="$(jq -r --arg d "$CD" '.[$d] // empty' "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" 2>/dev/null)" ;;
 esac
 
-# ── トークン使用量(コスト見直しの材料。委任ログの tokens にはこの total を転記する)──
+# ── トークン使用量とコスト(委任ログには total と cost_usd を転記する)──
 TOKENS="$(extract_tokens "$CLI" "$SESSION_ID")"
 TOK_TOTAL=""
 [ -n "$TOKENS" ] && TOK_TOTAL="${TOKENS##* }"
+COST_USD="$(cost_usd "$CLI" "$TOK_TOTAL")"
 
 # ── limit 自動検知(確実な失敗のみ自動記録。exit 0 の検知は警告に留め、判断は司令塔)──
 LIMIT_PATTERN='rate.?limit|quota.*(exceed|exhaust)|resource.?exhausted|too many requests|doesn.t have any credits|usage.?limit'
@@ -295,19 +316,26 @@ jq -cn \
   --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
-  --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" \
+  --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" --arg cost_usd "$COST_USD" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
   '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,cd:$cd,
     prompt_file:$prompt_file,log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
     tokens_total:($tokens_total|tonumber? // null),tokens_detail:$tokens_detail,
+    cost_usd:($cost_usd|tonumber? // null),
     git_dirty_before:$dirty_before,git_dirty_after:$dirty_after,cmd:$cmd}' >> "$RUNS_JSONL"
 
 # ── サマリ ────────────────────────────────────────────
 echo "run_id: $RUN_ID"
 echo "exit_code: $EXIT_CODE (duration: ${DURATION}s)"
 echo "session_id: ${SESSION_ID:-（取得できず — ログを確認）}"
-[ -n "$TOKENS" ] && echo "tokens: $TOKENS (in cached out total — 委任ログの tokens には total を記録)"
+[ -n "$TOKENS" ] && echo "tokens: $TOKENS (in cached out total — 委任ログには total と cost_usd を記録)"
+if [ -n "$COST_USD" ]; then
+  case "$CLI" in
+    grok) echo "cost: \$$COST_USD USD(input 単価による近似・実費)" ;;
+    *)    echo "cost: \$0(サブスク・クォータ内 — 実費なし。消費の把握は tokens で)" ;;
+  esac
+fi
 echo "log: $LOG_FILE"
 [ -n "$REPORT" ] && echo "report: $REPORT"
 if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
