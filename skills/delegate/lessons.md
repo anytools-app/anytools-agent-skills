@@ -91,6 +91,17 @@ jq -s '[.[] | select(.tokens != null)] | group_by([.cli, .model, .kind]) |
 ' "${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}/delegation-log.jsonl"
 ```
 
+司令塔レビューの見逃し率 — 採用後に人間が NG を出して発生した委任(`rework_of` 付き)の割合:
+
+```bash
+jq -s '{human_rework: [.[] | select(.rework_of != null)] | length,
+        adopted: [.[] | select(.outcome == "採用" or .outcome == "一部採用")] | length}
+' "${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}/delegation-log.jsonl"
+```
+
+- この率が見直しのたびに上がる場合は、モデルやルーティングではなく**司令塔レビューの強化**を検討する(独立レビューの適用拡大、実機・実測確認の完了条件化、指示書の完了条件の数値化)
+- `rework_of` は 2026-07-14(138件時点)導入。それ以前のエントリは確実に人間差し戻しと判別できた6件のみ遡及タグ付けしているため、率の時系列比較は導入以降を基準にする
+
 ### ルーティング表・モデル表の更新条件
 
 - 更新してよいのは、**同じ cli/model/kind の組で3件以上あり、かつ `過剰` または `過小` が明確に偏った場合だけ**(全体10件で表を動かすのは早すぎる)
