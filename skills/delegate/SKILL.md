@@ -260,11 +260,12 @@ jq -cn \
   --arg cause "<none|model|instruction|spec_change|environment|tooling|product_decision|unknown>" \
   --arg note "<判定理由1行>" \
   --arg run_id "<delegate-run の run_id/なし>" \
+  --arg rework_of "<人間の差し戻し起点なら元委任の run_id か task 要約/それ以外は空>" \
   --arg tokens "<総トークン数/不明なら空>" \
   --arg cost_usd "<実費USD/不明なら空>" \
   --argjson resumes <回数> \
   --argjson scope_violation <true|false> \
-  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id,tokens:($tokens|tonumber? // null),cost_usd:($cost_usd|tonumber? // null)}' \
+  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id,rework_of:(if $rework_of == "" then null else $rework_of end),tokens:($tokens|tonumber? // null),cost_usd:($cost_usd|tonumber? // null)}' \
   >> "$LOG_DIR/delegation-log.jsonl"
 ```
 
@@ -273,6 +274,7 @@ jq -cn \
 - `未完了` は**ユーザー都合・仕様変更・作業中断など、委任先や環境の失敗ではない理由**に限る。CLIエラー・認証エラー・timeout・権限詰まりは `失敗`(+ `validation:"not_run"`、`cause` に `tooling|environment|unknown` 等)
 - **手戻りの起因は `cause` で構造化する**(値と処置は「修正・再委任の上限」の表)。**手戻りがなかった委任(修正指示なし、または独立レビュー反映など正常工程の resume のみ)は `cause:"none"`**。`unknown` は「手戻りがあったが原因を特定できていない」専用で、`none` の代用にしない。空文字も不可(集計を壊す。131件見直しで空文字9件・手戻りなしの `unknown` 流用多数が実発生)。resume が多くても `cause` が `instruction` や `spec_change` ならモデル評価に使わない。`routing_verdict:"過小"` の根拠にできるのは `cause:"model"`(指示の誤解・雑な実装・虚偽の完了報告)だけ。**独立レビューの指摘を反映するための resume は正常工程であり、それ自体は cause に数えない**(指摘の根因が指示書の誤り・欠落である場合のみ `instruction`。76件見直しでレビュー反映 resume が `instruction` に混ざり指示書品質のシグナルが濁った実例あり)
 - **`tokens` は委任1件の総トークン数、`cost_usd` は費用(USD)**(いずれも resume 分も含むセッション累計)。codex / grok は delegate-run のサマリに出る値をそのまま転記する。claude-agent は Agent ツール実行後の usage 表示から tokens を転記し、`delegate-run --estimate-cost claude-agent <tokens>` で cost_usd へ換算する。**単価は `.env` の `COST_PER_MTOK_*` が正**: grok は API 従量の実単価(未設定時 2.00)、サブスク・定額勢(codex / agy / claude-agent)は「**月額 USD ÷ 月間総トークン(百万)**」の按分単価 — 契約・使用量に依存する社内情報なので `.env` にだけ書き、リポジトリに載せない。費用は `cost_usd`、クォータ・レート制限の物理量は `tokens` の二軸で見る(`lessons.md`「ログの見直しと昇格条件」)
+- **`rework_of` は「司令塔が採用した成果物に、後から人間が NG(修正指示・差し戻し)を出したことで発生した委任」にだけ付ける**(値は元委任の run_id か task 要約。それ以外は空にして null を記録する)。司令塔起点のフォローアップ・独立レビュー反映・新規機能の続きには付けない。完了前に人間 NG を同一セッションへの resume で処理した場合も付ける(エントリが分かれないため)。`cause` が委任先起因の手戻りを測るのに対し、`rework_of` は**司令塔レビューの見逃し**(rework_of 付き件数 ÷ 採用件数)を測る別軸 — 集計は `lessons.md`「ログの見直しと昇格条件」
 - `cli:"claude-agent"` は設計前の本格的なコードリーディング委任(Explore 等に数分規模で振ったもの)を対象とし、軽い単発検索は記録しない
 - 相談の判定材料は回答の質(原典確認で嘘が見つかったか、提案が採用に耐えたか)
 - 追記時に `wc -l` で件数を確認し、**10の倍数でユーザーに集計・見直しを提案する**(「委任ログを見直して」でも随時)。集計コマンド、ルーティング表・モデル表の更新条件、自動化の昇格条件は `lessons.md`「ログの見直しと昇格条件」

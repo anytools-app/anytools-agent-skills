@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-07-14
+
+### Added
+
+- **委任ログに `rework_of`(人間差し戻しの追跡)を追加**: 司令塔が採用した成果物に後から人間が NG を出して発生した委任にだけ、元委任の run_id か task 要約を記録する(それ以外は null)。`cause` が委任先起因の手戻りを測るのに対し、`rework_of` は司令塔レビューの見逃し率(rework_of 付き件数 ÷ 採用件数)を測る別軸。lessons に集計コマンドと「率が上がり続けたら司令塔レビュー強化を検討」の基準を追加(138件見直しで、人間差し戻し起点の委任が task 命名の痕跡でしか判別できないことが判明したため)
+
 ## [0.9.0] - 2026-07-14
 
 ### Added
