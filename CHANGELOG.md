@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-07-14
+
+### Added
+
+- **委任ログの `cause` に `none`(手戻りなし)を追加**: 修正指示なし、または独立レビュー反映など正常工程の resume のみで完了した委任は `none` を記録する。`unknown` は「手戻りがあったが原因未特定」専用に戻し、空文字は不可と明記(131件見直しで、手戻りなし委任の `unknown` 流用と空文字9件が実発生し、cause 集計のシグナルが濁っていたため)
+
 ## [0.8.0] - 2026-07-13
 
 ### Changed
