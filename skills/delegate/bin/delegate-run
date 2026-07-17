@@ -23,6 +23,8 @@
 #   単体取得: --extract-tokens <codex|grok> <SESSION_ID>(出力: "in cached out total")
 # コスト換算(実費 USD): grok のみ従量課金(input 単価で近似)。codex/agy はサブスク・クォータ内で実費 0。
 #   単体換算: --estimate-cost <cli> <tokens>(単価改定時は cost_usd() の単価を更新)
+# 委任ログの規約確認(読み取り専用): --lint-log
+#   outcome / cause / validation / kind / routing_verdict / delegation_verdict の enum 逸脱を列挙する。
 #
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
 #
@@ -109,8 +111,70 @@ cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(単価未設定・非�
   return 0
 }
 
+# ── 委任ログの enum 検証(読み取り専用)──────────────────
+lint_delegation_log() {
+  local log_file="$LOG_DIR/delegation-log.jsonl"
+  local line line_no=0 violations=0 index field allowed_json allowed_display value
+  local -a fields=(outcome cause validation kind routing_verdict delegation_verdict)
+  local -a allowed_jsons=(
+    '["採用","一部採用","破棄","未完了","失敗"]'
+    '["none","model","instruction","spec_change","environment","tooling","product_decision","unknown"]'
+    '["pass","no_new_failures","fail","not_run"]'
+    '["実装","相談","レビュー","調査"]'
+    '["適正","過剰","過小","委任先ミス"]'
+    '["必要","委任不要"]'
+  )
+  local -a allowed_displays=(
+    '採用|一部採用|破棄|未完了|失敗'
+    'none|model|instruction|spec_change|environment|tooling|product_decision|unknown'
+    'pass|no_new_failures|fail|not_run'
+    '実装|相談|レビュー|調査'
+    '適正|過剰|過小|委任先ミス'
+    '必要|委任不要'
+  )
+
+  [ -s "$log_file" ] || { echo "delegation-log.jsonl が存在しないか空"; return 0; }
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    if ! printf '%s\n' "$line" | jq -e -s 'length == 1' >/dev/null 2>&1; then
+      echo "line $line_no: JSON として解析できない"
+      violations=$((violations + 1))
+      continue
+    fi
+
+    for index in "${!fields[@]}"; do
+      field="${fields[$index]}"
+      allowed_json="${allowed_jsons[$index]}"
+      allowed_display="${allowed_displays[$index]}"
+      if ! printf '%s\n' "$line" | jq -e --arg field "$field" --argjson allowed "$allowed_json" \
+        'type == "object" and has($field) and .[$field] != null and .[$field] != "" and (.[$field] as $value | $allowed | index($value) != null)' \
+        >/dev/null 2>&1; then
+        if printf '%s\n' "$line" | jq -e --arg field "$field" 'type == "object" and has($field)' >/dev/null 2>&1; then
+          value="$(printf '%s\n' "$line" | jq -c --arg field "$field" '.[$field]')"
+          echo "line $line_no: $field=$value (許容: $allowed_display)"
+        else
+          echo "line $line_no: $field=(missing) (許容: $allowed_display)"
+        fi
+        violations=$((violations + 1))
+      fi
+    done
+  done < "$log_file"
+
+  if [ "$violations" -eq 0 ]; then
+    echo "OK: ${line_no}行すべて規約準拠"
+    return 0
+  fi
+  echo "NG: ${line_no}行中 ${violations}件の逸脱"
+  return 1
+}
+
 # ── cooldown 管理コマンド(単独で使う)─────────────────
 case "${1:-}" in
+  --lint-log)
+    [ $# -eq 1 ] || die "使い方: --lint-log"
+    lint_delegation_log
+    exit $? ;;
   --cooldowns)
     [ -s "$COOLDOWN_FILE" ] || { echo "cooldown の記録なし"; exit 0; }
     jq -r --arg now "$(iso_now)" \
@@ -157,7 +221,7 @@ while [ $# -gt 0 ]; do
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
