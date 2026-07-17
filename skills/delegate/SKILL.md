@@ -250,8 +250,9 @@ jq -cn \
   --arg repo "<リポジトリ名>" \
   --arg task "<1行要約>" \
   --arg kind "<実装|相談|レビュー|調査>" \
-  --arg cli "<codex|grok|agy|claude-agent>" \
+  --arg cli "<codex|grok|agy|claude-agent|self>" \
   --arg model "<モデル>" \
+  --arg commander "<司令塔のモデルID(例: claude-fable-5)>" \
   --arg effort "<effort/なし>" \
   --arg outcome "<採用|一部採用|破棄|未完了|失敗>" \
   --arg validation "<pass|no_new_failures|fail|not_run>" \
@@ -260,12 +261,13 @@ jq -cn \
   --arg cause "<none|model|instruction|spec_change|environment|tooling|product_decision|unknown>" \
   --arg note "<判定理由1行>" \
   --arg run_id "<delegate-run の run_id/なし>" \
-  --arg rework_of "<人間の差し戻し起点なら元委任の run_id か task 要約/それ以外は空>" \
+  --arg rework_of "<人間の差し戻し起点なら元委任の run_id か task 要約(直接処理の差し戻しは direct:<要約>)/それ以外は空>" \
+  --arg review_findings "<独立レビューが出した実指摘数/独立レビュー未実施は空>" \
   --arg tokens "<総トークン数/不明なら空>" \
   --arg cost_usd "<実費USD/不明なら空>" \
   --argjson resumes <回数> \
   --argjson scope_violation <true|false> \
-  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id,rework_of:(if $rework_of == "" then null else $rework_of end),tokens:($tokens|tonumber? // null),cost_usd:($cost_usd|tonumber? // null)}' \
+  '{date:$date,repo:$repo,task:$task,kind:$kind,cli:$cli,model:$model,commander:$commander,effort:$effort,outcome:$outcome,validation:$validation,resumes:$resumes,scope_violation:$scope_violation,delegation_verdict:$delegation_verdict,routing_verdict:$routing_verdict,cause:$cause,note:$note,run_id:$run_id,rework_of:(if $rework_of == "" then null else $rework_of end),review_findings:($review_findings|tonumber? // null),tokens:($tokens|tonumber? // null),cost_usd:($cost_usd|tonumber? // null)}' \
   >> "$LOG_DIR/delegation-log.jsonl"
 ```
 
@@ -275,6 +277,9 @@ jq -cn \
 - **手戻りの起因は `cause` で構造化する**(値と処置は「修正・再委任の上限」の表)。**手戻りがなかった委任(修正指示なし、または独立レビュー反映など正常工程の resume のみ)は `cause:"none"`**。`unknown` は「手戻りがあったが原因を特定できていない」専用で、`none` の代用にしない。空文字も不可(集計を壊す。131件見直しで空文字9件・手戻りなしの `unknown` 流用多数が実発生)。resume が多くても `cause` が `instruction` や `spec_change` ならモデル評価に使わない。`routing_verdict:"過小"` の根拠にできるのは `cause:"model"`(指示の誤解・雑な実装・虚偽の完了報告)だけ。**独立レビューの指摘を反映するための resume は正常工程であり、それ自体は cause に数えない**(指摘の根因が指示書の誤り・欠落である場合のみ `instruction`。76件見直しでレビュー反映 resume が `instruction` に混ざり指示書品質のシグナルが濁った実例あり)
 - **`tokens` は委任1件の総トークン数、`cost_usd` は費用(USD)**(いずれも resume 分も含むセッション累計)。codex / grok は delegate-run のサマリに出る値をそのまま転記する。claude-agent は Agent ツール実行後の usage 表示から tokens を転記し、`delegate-run --estimate-cost claude-agent <tokens>` で cost_usd へ換算する。**単価は `.env` の `COST_PER_MTOK_*` が正**: grok は API 従量の実単価(未設定時 2.00)、サブスク・定額勢(codex / agy / claude-agent)は「**月額 USD ÷ 月間総トークン(百万)**」の按分単価 — 契約・使用量に依存する社内情報なので `.env` にだけ書き、リポジトリに載せない。費用は `cost_usd`、クォータ・レート制限の物理量は `tokens` の二軸で見る(`lessons.md`「ログの見直しと昇格条件」)
 - **`rework_of` は「司令塔が採用した成果物に、後から人間が NG(修正指示・差し戻し)を出したことで発生した委任」にだけ付ける**(値は元委任の run_id か task 要約。それ以外は空にして null を記録する)。司令塔起点のフォローアップ・独立レビュー反映・新規機能の続きには付けない。完了前に人間 NG を同一セッションへの resume で処理した場合も付ける(エントリが分かれないため)。`cause` が委任先起因の手戻りを測るのに対し、`rework_of` は**司令塔レビューの見逃し**(rework_of 付き件数 ÷ 採用件数)を測る別軸 — 集計は `lessons.md`「ログの見直しと昇格条件」
+- **`commander` は記録時のセッションの司令塔モデルID**(システムプロンプトに表示される exact model ID。例: `claude-fable-5`)。司令塔スコアカード(`lessons.md`)を司令塔モデル別に比較するための識別子で、`"best"` エイリアスの解決先が変わった時に推移の断絶を検出できる。導入(2026-07-17、203件)以前の過去分は null のまま遡及しない
+- **`review_findings` は独立レビューを実施した委任にだけ数値で入れる**: 司令塔レビュー通過後に独立レビューが出した「実指摘」(誤検知を除き、修正・記録に至ったもの)の件数。0 も情報(独立レビューが何も見つけなかった=司令塔レビューが十分だった証拠)。未実施は空にして null。`rework_of`(人間差し戻し)より手前で司令塔レビューの見逃しを検出する早期警報
+- **`cli:"self"` は「人間に差し戻された直接処理を司令塔自身が修正した」記録専用**(`rework_of:"direct:<元作業の要約>"` と `model`=`commander` を必ず伴う)。通常の直接処理は従来どおり記録しない — 直接処理はゲート判定で「記録コストに満たない」と判断した仕事であり、失敗した場合だけ可視化する
 - `cli:"claude-agent"` は設計前の本格的なコードリーディング委任(Explore 等に数分規模で振ったもの)を対象とし、軽い単発検索は記録しない
 - 相談の判定材料は回答の質(原典確認で嘘が見つかったか、提案が採用に耐えたか)
 - ログの見直し時は、集計に入る前にまず `delegate-run --lint-log` を実行して enum 逸脱(規約外の値・空文字・フィールド欠落)を検出し、逸脱行を修正してから集計する
