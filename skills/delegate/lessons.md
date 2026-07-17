@@ -102,6 +102,45 @@ jq -s '{human_rework: [.[] | select(.rework_of != null)] | length,
 - この率が見直しのたびに上がる場合は、モデルやルーティングではなく**司令塔レビューの強化**を検討する(独立レビューの適用拡大、実機・実測確認の完了条件化、指示書の完了条件の数値化)
 - `rework_of` は 2026-07-14(138件時点)導入。それ以前のエントリは確実に人間差し戻しと判別できた6件のみ遡及タグ付けしているため、率の時系列比較は導入以降を基準にする
 
+### 司令塔スコアカード(見直しごとに算出・追記)
+
+委任先だけでなく**司令塔自身の仕事**を定点観測する。ログの大半は司令塔の自己採点なので、客観寄りの指標(instruction 率・rework 率・review_findings・lint 違反)を軸にし、自己採点そのもの(routing_verdict 等)の妥当性は下のブラインド監査で別途検証する。
+
+見直しのたびに次を算出し、`commander` 別に比較する(`commander` が混在する期間は「司令塔の変化」と「モデル交代」を区別する):
+
+```bash
+LOG="${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}/delegation-log.jsonl"
+jq -s 'group_by(.commander) | map({
+  commander: .[0].commander,
+  n: length,
+  instruction_rate: (([.[] | select(.kind == "実装")] | length) as $impl |
+    if $impl == 0 then null else
+      (([.[] | select(.kind == "実装" and .cause == "instruction")] | length) / $impl * 1000 | round / 1000) end),
+  rework_rate: (([.[] | select(.outcome == "採用" or .outcome == "一部採用")] | length) as $adopted |
+    if $adopted == 0 then null else
+      (([.[] | select(.rework_of != null)] | length) / $adopted * 1000 | round / 1000) end),
+  review_findings_avg: ([.[] | select(.review_findings != null) | .review_findings] as $rf |
+    if ($rf | length) == 0 then null else (($rf | add) / ($rf | length) * 100 | round / 100) end),
+  self_rework: [.[] | select(.cli == "self")] | length,
+  retry_budget_violations: [.[] | select(.resumes >= 3)] | length
+})' "$LOG"
+```
+
+- 算出結果は1行ずつ `"$LOG_DIR"/commander-scorecard.jsonl` に追記する(`{date, entries_total, commander別の上記指標, lint_violations}` の形。lint_violations は `delegate-run --lint-log` で見直し時に検出・修正した件数)。単発の値より**推移**を見る — instruction_rate が下がっているかが指示書品質の成長指標
+- 判断の使い方: instruction_rate 悪化 → 指示書の完了条件数値化・棚卸しの徹底 / rework_rate 悪化 → レビューの実測ゲート強化 / review_findings 平均の上昇 → 司令塔の事前レビューが独立レビューに依存し始めている兆候 / self_rework 増加 → 委任可否ゲートが直接処理に甘い
+- スコアカードもローカル専用(リポジトリにコミットしない)
+
+### ブラインド司令塔監査(自己採点バイアスの検証)
+
+ログの `routing_verdict` / `delegation_verdict` / `cause` は司令塔の自己採点であり、「適正」がいくら並んでも盲点の不在は証明できない。委任先に独立レビューを課すのと同じ原理を司令塔に適用する:
+
+1. **タイミング**: ログ見直しの節目(目安: 30件ごと、または司令塔モデル交代の直後)
+2. **サンプル**: 前回監査以降の区間から実装エントリ中心に無作為5件
+3. **資材(ブラインド)**: 各件について「指示書ファイル+成果物の diff(コミット参照)+ログ行から **routing_verdict / delegation_verdict / cause を伏せたもの**」を渡す。司令塔の自己評価・成功宣言は渡さない(独立レビューの資材規律と同じ)
+4. **担当**: レビュー持ち回りと同じ3系統から、直近で監査に使っていない系統。問いは「この委任は (a) そもそも委任すべきだったか (b) CLI/モデル/effort は適切だったか(過剰・過小含む) (c) 手戻りの根因分類は何か (d) この成果物を採用した判断は妥当か」
+5. **突き合わせ**: 監査者の判定と自己採点の**不一致件数と軸**を記録する。監査自体は通常の委任として委任ログに記録(kind:"レビュー"、task 先頭に「司令塔監査:」)し、不一致率は scorecard 行の `audit_disagreement` に入れる
+6. **昇格条件**: 不一致が**同じ軸で3件以上偏った場合のみ**対処する(例: cause 分類が毎回甘い → 記録規約の定義を締める / 過剰の見逃しが偏る → ティア選択の既定を下げる)。単発の不一致は監査者の誤りの可能性もあるため、原典(diff・検証結果)で裏取りしてから採否を決める — 監査者の判定も鵜呑みにしない(このスキルの大原則)
+
 ### ルーティング表・モデル表の更新条件
 
 - 更新してよいのは、**同じ cli/model/kind の組で3件以上あり、かつ `過剰` または `過小` が明確に偏った場合だけ**(全体10件で表を動かすのは早すぎる)

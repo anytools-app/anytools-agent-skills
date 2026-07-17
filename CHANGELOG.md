@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-07-17
+
+### Added
+
+- **司令塔スコアカードとブラインド監査**: 委任先だけでなく司令塔自身の仕事をログから振り返れるようにする
+  - `commander` フィールド(司令塔のモデルID)を委任ログに追加 — `"best"` エイリアスの解決先が変わった時に「司令塔の成長」と「モデル交代」を区別できる。過去分は遡及しない
+  - `review_findings` フィールド(独立レビューの実指摘数。0 も情報、未実施は null)— 人間差し戻しより手前で司令塔レビューの見逃しを検出する早期警報
+  - `cli:"self"` + `rework_of:"direct:<要約>"` — 人間に差し戻された直接処理の修正だけを記録する(通常の直接処理は従来どおり記録しない)
+  - lessons「司令塔スコアカード」: 見直しごとに instruction 率 / rework 率 / review_findings 平均 / self_rework / retry 予算超過を commander 別に算出し `commander-scorecard.jsonl` へ追記、推移で評価
+  - lessons「ブラインド司令塔監査」: 自己採点バイアス対策として、無作為5件の routing_verdict / cause / 採否を判定を伏せて外部AIに再判定させ、不一致の偏り(同一軸3件以上)だけを対処条件とする
+
 ## [0.11.0] - 2026-07-17
 
 ### Added
