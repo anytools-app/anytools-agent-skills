@@ -176,7 +176,7 @@ assert_contains "log dir: symlink 越しの .env 解決" "$TMP/envfile-logs/runs
 # 実 .env の単価に影響されないよう FAKESKILL(単価未設定の .env)側のバイナリで検証する
 run "$FAKESKILL/bin/delegate-run" --estimate-cost grok 1000000
 assert_contains "cost: grok 既定は API input 単価" "2.0000"
-run "$FAKESKILL/bin/delegate-run" --estimate-cost codex 5000000
+run env -u COST_PER_MTOK_CODEX "$FAKESKILL/bin/delegate-run" --estimate-cost codex 5000000
 assert_exit "cost: 単価未設定は換算しない(エラーにもしない)" 0
 assert_not_contains "cost: 単価未設定で数値を出さない" "."
 run env COST_PER_MTOK_CODEX=0.5 "$FAKESKILL/bin/delegate-run" --estimate-cost codex 1000000
@@ -185,6 +185,35 @@ run env COST_PER_MTOK_CLAUDE_AGENT=0.13 "$FAKESKILL/bin/delegate-run" --estimate
 assert_contains "cost: claude-agent の換算" "0.2600"
 run "$FAKESKILL/bin/delegate-run" --estimate-cost grok not-a-number
 assert_exit "cost: 非数値でもエラーにしない" 0
+
+# ── 委任ログ lint: 不存在 / 正常 enum / 実発生した逸脱パターン ──
+run "$BIN" --lint-log
+assert_exit "lint: ファイル不存在でも成功" 0
+assert_contains "lint: ファイル不存在を案内" "存在しないか空"
+
+mkdir -p "$DELEGATE_LOG_DIR"
+printf '%s\n' \
+  '{"outcome":"採用","cause":"none","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
+  '{"outcome":"一部採用","cause":"instruction","validation":"no_new_failures","kind":"調査","routing_verdict":"過小","delegation_verdict":"必要"}' \
+  > "$DELEGATE_LOG_DIR/delegation-log.jsonl"
+run "$BIN" --lint-log
+assert_exit "lint: 正常 enum は成功" 0
+assert_contains "lint: 調査を含む正常行は OK" "OK: 2行すべて規約準拠"
+
+printf '%s\n' \
+  '{"outcome":"採用","cause":"","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
+  '{"outcome":"採用(司令塔修正込み)","cause":"none","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
+  '{"outcome":"採用","cause":"reach-analysis","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
+  '{"outcome":"採用","cause":"none","validation":"pass","kind":"実装","delegation_verdict":"必要"}' \
+  'JSON 解析不能行' \
+  > "$DELEGATE_LOG_DIR/delegation-log.jsonl"
+run "$BIN" --lint-log
+assert_exit "lint: 逸脱があれば exit 1" 1
+assert_contains "lint: 空 cause の行番号とフィールド" "line 1: cause="
+assert_contains "lint: 注記混入 outcome の行番号とフィールド" "line 2: outcome="
+assert_contains "lint: enum 外 cause の行番号とフィールド" "line 3: cause="
+assert_contains "lint: 欠落 routing_verdict の行番号とフィールド" "line 4: routing_verdict=(missing)"
+assert_contains "lint: 解析不能行の行番号" "line 5: JSON として解析できない"
 
 echo
 echo "PASS: $PASS / FAIL: $FAIL"

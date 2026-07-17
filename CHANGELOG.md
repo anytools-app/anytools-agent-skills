@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-07-17
+
+### Added
+
+- **委任ログの enum lint を追加**: `delegate-run --lint-log` が `delegation-log.jsonl` の `outcome` / `cause` / `validation` / `kind` / `routing_verdict` / `delegation_verdict` を読み取り専用で検証し、空文字・欠落・enum 外の値・JSON 解析不能行を行番号+フィールド名で列挙する。自動修正は行わず、逸脱時は exit 1。SKILL.md の `kind` enum に `調査` を追加し、ログ見直しは集計前に lint を実行する手順へ更新。テスト 78→88 件(直近3回のログ見直し(131/181/203件時点)で毎回、並行セッションの規約逸脱の手動修正が発生したため)
+
 ## [0.10.0] - 2026-07-14
 
 ### Added
