@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-07-17
+
+### Added
+
+- **基本フローに手順0(入力種別の判定)を追加**: 質問・調査・相談への成果物は回答・調査結果であり、委任するとしても read-only に限る。実装(ファイル変更を伴う委任・直接処理)へ進むのはユーザーが明示的に実装を指示した場合だけ。「回答の勢いで実装に着手する」事故がユーザーフィードバックで2度指摘されたため、委任フローの入口で構造的に止める(グローバル CLAUDE.md 側の同旨の規律とセットで運用)
+
 ## [0.12.0] - 2026-07-17
 
 ### Added
