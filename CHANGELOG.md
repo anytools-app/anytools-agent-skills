@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] - 2026-07-19
+
+### Fixed
+
+- **commander 誤記録の根治(v0.14.0 の不完全さを是正)**: v0.14.0 で記入テンプレートを `--current-commander` に変えたが、**既に走っているセッションは古い手入力テンプレート(fable 固定)をコンテキストに保持**するため、opus へ切替後も fable を記録し続ける事故が継続していた(ユーザー報告)。記入側の修正だけでは不十分と判明したため、記録の自動化と突き合わせ監査を追加:
+  - `delegate-run` が委任実行のたびに実モデルを **`runs.jsonl` の `commander` に自動記録**(手入力テンプレートに依存しない権威ある記録)
+  - **`delegate-run --audit-commander [--fix]`** を新設: 委任ログの `commander` を runs.jsonl/transcript の実モデルと **run_id 単位で決定論的に照合**し、不一致を検出・訂正する(runs.jsonl の `prompt_file` パスに埋まる司令塔 session_id と ts から真値を復元)。導入日(2026-07-17)より前は触らない
+  - `resolve_commander` を sidechain 除外に強化(サブエージェントの sonnet/haiku を main-loop の司令塔と取り違えない)
+  - 実績: 257 件で 31 件の誤記録を訂正(fable→opus 2件=報告のバグ、null 復元29件)。runs.jsonl 280 件に commander を backfill。前回の時刻窓ベースの曖昧な null 化を決定論的な真値へ置換。これで初めて Fable/Opus 司令塔の正確な比較データが揃う
+  - lessons のログ見直し手順に「まず `--lint-log` と `--audit-commander --fix` を走らせる」を追加。テスト 93→102
+
 ## [0.14.0] - 2026-07-19
 
 ### Fixed

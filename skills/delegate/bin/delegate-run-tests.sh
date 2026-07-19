@@ -229,6 +229,36 @@ assert_contains "current-commander: transcript 無しは unknown" "unknown"
 run env -u CLAUDE_CODE_SESSION_ID HOME="$CHOME" "$BIN" --current-commander
 assert_contains "current-commander: session-id 無しは unknown" "unknown"
 
+# サブエージェント(isSidechain)は無視して main-loop の実モデルを返す
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-fable-5"}}' '{"type":"assistant","message":{"model":"claude-opus-4-8"}}' '{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5-20251001"}}' > "$CHOME/.claude/projects/testproj/sess-side.jsonl"
+run env HOME="$CHOME" CLAUDE_CODE_SESSION_ID=sess-side "$BIN" --current-commander
+assert_contains "current-commander: sidechain を無視し main-loop を返す" "claude-opus-4-8"
+assert_not_contains "current-commander: sidechain の haiku は返さない" "haiku"
+
+# ── commander 監査: runs.jsonl 記録の実モデルと委任ログを突き合わせ ──
+AHOME="$TMP/ahome"; ALOG="$TMP/alogs"; mkdir -p "$ALOG"
+printf '%s\n' \
+  '{"run_id":"run_A","ts":"2026-07-19T09:00:00Z","commander":"claude-opus-4-8","prompt_file":"/x"}' \
+  '{"run_id":"run_B","ts":"2026-07-10T09:00:00Z","commander":"claude-fable-5","prompt_file":"/x"}' \
+  > "$ALOG/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-19","run_id":"run_A","commander":"claude-fable-5","kind":"実装"}' \
+  '{"date":"2026-07-10","run_id":"run_B","commander":"claude-fable-5","kind":"実装"}' \
+  '{"date":"2026-07-19","run_id":"run_Z","commander":"claude-fable-5","kind":"実装"}' \
+  > "$ALOG/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$ALOG" HOME="$AHOME" "$BIN" --audit-commander
+assert_exit "audit-commander: 不一致ありは exit 1" 1
+assert_contains "audit-commander: opus 誤記録を検出" "run_A"
+assert_not_contains "audit-commander: 導入日前(run_B)は対象外" "run_B"
+assert_not_contains "audit-commander: runs 未記録(run_Z)は対象外" "run_Z"
+
+run env DELEGATE_LOG_DIR="$ALOG" HOME="$AHOME" "$BIN" --audit-commander --fix
+assert_contains "audit-commander --fix: 訂正件数を報告" "1 件を訂正"
+CORRECTED="$(jq -r 'select(.run_id=="run_A") | .commander' "$ALOG/delegation-log.jsonl")"
+[ "$CORRECTED" = "claude-opus-4-8" ] && ok || ng "audit-commander --fix: run_A が opus に訂正される(実際: $CORRECTED)"
+UNTOUCHED="$(jq -r 'select(.run_id=="run_B") | .commander' "$ALOG/delegation-log.jsonl")"
+[ "$UNTOUCHED" = "claude-fable-5" ] && ok || ng "audit-commander --fix: 導入日前 run_B は不変(実際: $UNTOUCHED)"
+
 echo
 echo "PASS: $PASS / FAIL: $FAIL"
 rm -rf "$TMP"

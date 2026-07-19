@@ -25,6 +25,7 @@
 #   単体換算: --estimate-cost <cli> <tokens>(単価改定時は cost_usd() の単価を更新)
 # 委任ログの規約確認(読み取り専用): --lint-log
 # 司令塔モデルの解決(委任ログの commander 用。/model 切替を反映): --current-commander
+# 委任ログの commander を実モデルと突き合わせ(誤記録の検出・訂正): --audit-commander [--fix]
 #   outcome / cause / validation / kind / routing_verdict / delegation_verdict の enum 逸脱を列挙する。
 #
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
@@ -122,10 +123,77 @@ resolve_commander() {
   local tf
   tf=$(ls -1 "$HOME/.claude/projects/"*/"$sid.jsonl" 2>/dev/null | head -1)
   [ -n "$tf" ] && [ -f "$tf" ] || { echo "unknown"; return 0; }
+  # サブエージェント(isSidechain=true)は別モデルのことがある → main-loop のみ採用
   local model
-  model=$(grep '"type":"assistant"' "$tf" 2>/dev/null | tail -1 \
-    | jq -r '.message.model // .model // empty' 2>/dev/null)
+  model=$(grep '"type":"assistant"' "$tf" 2>/dev/null \
+    | jq -rc 'select((.isSidechain // false)==false) | (.message.model // .model // empty)' 2>/dev/null \
+    | grep -v '^$' | tail -1)
   [ -n "$model" ] && echo "$model" || echo "unknown"
+}
+
+# ── run_id からその委任を記録した司令塔セッションの実モデルを決定論的に復元 ──
+# runs.jsonl の prompt_file/report_file パスに埋まる司令塔 session_id と ts を使い、
+# そのセッションの transcript の ts 直前の main-loop assistant モデルを返す(unknown 可)。
+commander_for_run() {
+  local rid="$1"
+  local rec run_ts csid pf tf
+  rec=$(jq -c --arg r "$rid" 'select(.run_id==$r)' "$RUNS_JSONL" 2>/dev/null | tail -1)
+  [ -n "$rec" ] || { echo "unknown"; return 0; }
+  # 既に commander が記録済みならそれを正とする(自動記録後の委任)
+  local recorded
+  recorded=$(printf '%s' "$rec" | jq -r '.commander // empty' 2>/dev/null)
+  [ -n "$recorded" ] && { echo "$recorded"; return 0; }
+  run_ts=$(printf '%s' "$rec" | jq -r '.ts // empty')
+  pf=$(printf '%s' "$rec" | jq -r '(.prompt_file // .report_file) // empty')
+  csid=$(printf '%s' "$pf" | sed -nE 's#.*/claude-501/[^/]+/([0-9a-f-]{36})/.*#\1#p')
+  [ -n "$csid" ] && [ -n "$run_ts" ] || { echo "unknown"; return 0; }
+  tf=$(ls -1 "$HOME/.claude/projects/"*/"$csid.jsonl" 2>/dev/null | head -1)
+  [ -n "$tf" ] && [ -f "$tf" ] || { echo "unknown"; return 0; }
+  local model
+  model=$(grep '"type":"assistant"' "$tf" 2>/dev/null \
+    | jq -rc --arg ts "$run_ts" 'select((.isSidechain // false)==false) | select((.timestamp // "") <= $ts) | (.message.model // .model // empty)' 2>/dev/null \
+    | grep -v '^$' | tail -1)
+  [ -n "$model" ] && echo "$model" || echo "unknown"
+}
+
+# ── 委任ログの commander を runs.jsonl / transcript の実モデルと突き合わせ(--fix で訂正)──
+audit_commander() {
+  local fix="${1:-}"
+  local log_file="$LOG_DIR/delegation-log.jsonl"
+  [ -s "$log_file" ] || { echo "delegation-log.jsonl が存在しないか空"; return 0; }
+  # commander フィールド導入日。これより前は「遡及しない」ため触らない。
+  local since="2026-07-17"
+  local tmp; tmp=$(mktemp)
+  local mismatches=0 fixed=0 line rid cur truth edate
+  while IFS= read -r line; do
+    [ -n "$line" ] || { printf '\n'; continue; }
+    edate=$(printf '%s' "$line" | jq -r '.date // ""' 2>/dev/null)
+    rid=$(printf '%s' "$line" | jq -r '.run_id // empty' 2>/dev/null)
+    cur=$(printf '%s' "$line" | jq -r 'if has("commander") then (.commander // "null") else "__absent__" end' 2>/dev/null)
+    # 導入日より前 / run_id なしは対象外(欠損の補完も導入日以降のみ)
+    if [ -z "$rid" ] || [ "$edate" \< "$since" ]; then printf '%s\n' "$line"; continue; fi
+    truth=$(commander_for_run "$rid")
+    if [ "$truth" = "unknown" ]; then printf '%s\n' "$line"; continue; fi
+    if [ "$cur" != "$truth" ]; then
+      mismatches=$((mismatches+1))
+      echo "  mismatch: $rid  記録=$cur  実=$truth" >&2
+      if [ "$fix" = "--fix" ]; then
+        printf '%s\n' "$(printf '%s' "$line" | jq -c --arg m "$truth" '.commander=$m')"
+        fixed=$((fixed+1))
+        continue
+      fi
+    fi
+    printf '%s\n' "$line"
+  done < "$log_file" > "$tmp"
+  if [ "$fix" = "--fix" ]; then
+    mv "$tmp" "$log_file"
+    echo "commander 監査: $mismatches 件の不一致を検出、$fixed 件を訂正"
+  else
+    rm -f "$tmp"
+    echo "commander 監査: $mismatches 件の不一致(--fix で訂正)"
+    [ "$mismatches" -eq 0 ] && return 0 || return 1
+  fi
+  return 0
 }
 
 # ── 委任ログの enum 検証(読み取り専用)──────────────────
@@ -196,6 +264,10 @@ case "${1:-}" in
     [ $# -eq 1 ] || die "使い方: --current-commander"
     resolve_commander
     exit 0 ;;
+  --audit-commander)
+    case "${2:-}" in ''|--fix) ;; *) die "使い方: --audit-commander [--fix]" ;; esac
+    audit_commander "${2:-}"
+    exit $? ;;
   --cooldowns)
     [ -s "$COOLDOWN_FILE" ] || { echo "cooldown の記録なし"; exit 0; }
     jq -r --arg now "$(iso_now)" \
@@ -399,15 +471,17 @@ if grep -qiE "$LIMIT_PATTERN" "$LOG_FILE" 2>/dev/null; then
 fi
 
 # ── 実行情報 JSONL ────────────────────────────────────
+COMMANDER="$(resolve_commander)"
 jq -cn \
   --arg run_id "$RUN_ID" --arg ts "$(date -u +%FT%TZ)" \
   --arg cli "$CLI" --arg mode "$MODE" --arg model "$MODEL" --arg effort "$EFFORT" \
+  --arg commander "$COMMANDER" \
   --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
   --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" --arg cost_usd "$COST_USD" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
-  '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,cd:$cd,
+  '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,commander:$commander,cd:$cd,
     prompt_file:$prompt_file,log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
     tokens_total:($tokens_total|tonumber? // null),tokens_detail:$tokens_detail,
@@ -416,6 +490,7 @@ jq -cn \
 
 # ── サマリ ────────────────────────────────────────────
 echo "run_id: $RUN_ID"
+echo "commander: $COMMANDER(委任ログの --arg commander はこの値を使う。手入力しない)"
 echo "exit_code: $EXIT_CODE (duration: ${DURATION}s)"
 echo "session_id: ${SESSION_ID:-（取得できず — ログを確認）}"
 [ -n "$TOKENS" ] && echo "tokens: $TOKENS (in cached out total — 委任ログには total と cost_usd を記録)"
