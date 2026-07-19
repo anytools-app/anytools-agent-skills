@@ -193,6 +193,7 @@ tail -30 "$LOG_DIR/delegation-log.jsonl" | jq -r 'select(.kind == "レビュー"
 ```
 
 - **例外(品質優先)**: 認証・権限・課金・DB移行・セキュリティなど高リスクの独立レビューは、司令塔(Claude)と同系になる Claude サブエージェントを避け、異系統(Antigravity / Grok)を優先する — 同系レビューは司令塔の思い込みを再生産しやすい
+- **偏りの是正**: 1系統が不安定(agy の environment 失敗)や事故(claude-agent のインジェクション事案、`lessons.md`)で敬遠されると、残る1系統(実測では grok)に偏る。偏ったら、cooldown・不安定が解消し次第、意識的に使っていない系統へ戻して均等性を回復する(254件時点で grok 20 / agy 8 / claude-agent 7 の偏りを実測。agy は環境調査の結着待ち、次のレビューは claude-agent か回復後の agy へ)
 - Claude サブエージェントでレビューする場合: Agent ツールの読み取り専用サブエージェントに「独立レビュー依頼書」の内容**だけ**を渡す(サブエージェントには会話コンテキストが渡らないため、ブラインドは自然に成立する)。model は sonnet を基本、複雑な変更は司令塔と同等モデル。委任ログには `cli:"claude-agent"`・`kind:"レビュー"` で記録する
 
 先に渡すもの:
@@ -253,7 +254,7 @@ jq -cn \
   --arg kind "<実装|相談|レビュー|調査>" \
   --arg cli "<codex|grok|agy|claude-agent|self>" \
   --arg model "<モデル>" \
-  --arg commander "<司令塔のモデルID(例: claude-fable-5)>" \
+  --arg commander "$(bash "$SKILL_DIR/bin/delegate-run" --current-commander)" \
   --arg effort "<effort/なし>" \
   --arg outcome "<採用|一部採用|破棄|未完了|失敗>" \
   --arg validation "<pass|no_new_failures|fail|not_run>" \
@@ -276,9 +277,10 @@ jq -cn \
 - `outcome` は成果物の最終処遇、`validation` は**委任成果物をレビューした時点**の検証結果(ベースラインに既存失敗がある場合、新規失敗ゼロなら `no_new_failures`)。Claude Code の軽微修正後に結果が変わった場合は最終結果を入れつつ、`note` に「軽微修正後pass」等と明記する(委任先が一発で通したように見せない)
 - `未完了` は**ユーザー都合・仕様変更・作業中断など、委任先や環境の失敗ではない理由**に限る。CLIエラー・認証エラー・timeout・権限詰まりは `失敗`(+ `validation:"not_run"`、`cause` に `tooling|environment|unknown` 等)
 - **手戻りの起因は `cause` で構造化する**(値と処置は「修正・再委任の上限」の表)。**手戻りがなかった委任(修正指示なし、または独立レビュー反映など正常工程の resume のみ)は `cause:"none"`**。`unknown` は「手戻りがあったが原因を特定できていない」専用で、`none` の代用にしない。空文字も不可(集計を壊す。131件見直しで空文字9件・手戻りなしの `unknown` 流用多数が実発生)。resume が多くても `cause` が `instruction` や `spec_change` ならモデル評価に使わない。`routing_verdict:"過小"` の根拠にできるのは `cause:"model"`(指示の誤解・雑な実装・虚偽の完了報告)だけ。**独立レビューの指摘を反映するための resume は正常工程であり、それ自体は cause に数えない**(指摘の根因が指示書の誤り・欠落である場合のみ `instruction`。76件見直しでレビュー反映 resume が `instruction` に混ざり指示書品質のシグナルが濁った実例あり)
+- **`model` は単一の enum 値**(`delegate-run --lint-log` は model を検査しないので規約で守る)。resume で上位ティアへ昇格した場合(例: terra 初回 → sol 修正)は、**採用された最終成果物を出したモデル**を `model` に記録し、昇格の経緯は `note` に書く。`gpt-5.6-terra→sol` のような複合値は使わない(`group_by(.model)` の集計を壊す)
 - **`tokens` は委任1件の総トークン数、`cost_usd` は費用(USD)**(いずれも resume 分も含むセッション累計)。codex / grok は delegate-run のサマリに出る値をそのまま転記する。claude-agent は Agent ツール実行後の usage 表示から tokens を転記し、`delegate-run --estimate-cost claude-agent <tokens>` で cost_usd へ換算する。**単価は `.env` の `COST_PER_MTOK_*` が正**: grok は API 従量の実単価(未設定時 2.00)、サブスク・定額勢(codex / agy / claude-agent)は「**月額 USD ÷ 月間総トークン(百万)**」の按分単価 — 契約・使用量に依存する社内情報なので `.env` にだけ書き、リポジトリに載せない。費用は `cost_usd`、クォータ・レート制限の物理量は `tokens` の二軸で見る(`lessons.md`「ログの見直しと昇格条件」)
 - **`rework_of` は「司令塔が採用した成果物に、後から人間が NG(修正指示・差し戻し)を出したことで発生した委任」にだけ付ける**(値は元委任の run_id か task 要約。それ以外は空にして null を記録する)。司令塔起点のフォローアップ・独立レビュー反映・新規機能の続きには付けない。完了前に人間 NG を同一セッションへの resume で処理した場合も付ける(エントリが分かれないため)。`cause` が委任先起因の手戻りを測るのに対し、`rework_of` は**司令塔レビューの見逃し**(rework_of 付き件数 ÷ 採用件数)を測る別軸 — 集計は `lessons.md`「ログの見直しと昇格条件」
-- **`commander` は記録時のセッションの司令塔モデルID**(システムプロンプトに表示される exact model ID。例: `claude-fable-5`)。司令塔スコアカード(`lessons.md`)を司令塔モデル別に比較するための識別子で、`"best"` エイリアスの解決先が変わった時に推移の断絶を検出できる。導入(2026-07-17、203件)以前の過去分は null のまま遡及しない
+- **`commander` は記録時の司令塔の実モデルID**。上のテンプレートどおり **`delegate-run --current-commander` で自動取得する(手入力しない)** — このコマンドは `CLAUDE_CODE_SESSION_ID` からセッション transcript を引き、直近 assistant ターンの `.message.model` を返す。**システムプロンプトの model ID は使わない**: セッション開始時に固定され `/model` 切替に追随しないため、opus に切り替えても `claude-fable-5` と誤記録する(2026-07-19、この罠で 254 件中10件が誤記録=opus 稼働窓で書かれたのに fable。遡及監査で null 化済み)。解決不能時は `unknown`。司令塔スコアカード(`lessons.md`)を司令塔モデル別に比較するための識別子で、`"best"` エイリアスの解決先が変わった時や `/model` 切替時に推移の断絶を検出できる。導入(2026-07-17、203件)以前の過去分は null のまま遡及しない
 - **`review_findings` は独立レビューを実施した委任にだけ数値で入れる**: 司令塔レビュー通過後に独立レビューが出した「実指摘」(誤検知を除き、修正・記録に至ったもの)の件数。0 も情報(独立レビューが何も見つけなかった=司令塔レビューが十分だった証拠)。未実施は空にして null。`rework_of`(人間差し戻し)より手前で司令塔レビューの見逃しを検出する早期警報
 - **`cli:"self"` は「人間に差し戻された直接処理を司令塔自身が修正した」記録専用**(`rework_of:"direct:<元作業の要約>"` と `model`=`commander` を必ず伴う)。通常の直接処理は従来どおり記録しない — 直接処理はゲート判定で「記録コストに満たない」と判断した仕事であり、失敗した場合だけ可視化する
 - `cli:"claude-agent"` は設計前の本格的なコードリーディング委任(Explore 等に数分規模で振ったもの)を対象とし、軽い単発検索は記録しない
