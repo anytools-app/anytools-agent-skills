@@ -215,6 +215,20 @@ assert_contains "lint: enum 外 cause の行番号とフィールド" "line 3: c
 assert_contains "lint: 欠落 routing_verdict の行番号とフィールド" "line 4: routing_verdict=(missing)"
 assert_contains "lint: 解析不能行の行番号" "line 5: JSON として解析できない"
 
+# ── 司令塔モデル解決(transcript の実モデル。/model 切替に追随)──
+CHOME="$TMP/chome"; mkdir -p "$CHOME/.claude/projects/testproj"
+printf '%s\n' '{"type":"user"}' '{"type":"assistant","message":{"model":"claude-fable-5"}}' '{"type":"assistant","message":{"model":"claude-opus-4-8"}}' > "$CHOME/.claude/projects/testproj/sess-xyz.jsonl"
+run env HOME="$CHOME" CLAUDE_CODE_SESSION_ID=sess-xyz "$BIN" --current-commander
+assert_exit "current-commander: 成功" 0
+assert_contains "current-commander: 直近 assistant の実モデルを返す" "claude-opus-4-8"
+assert_not_contains "current-commander: 古いモデルは返さない" "claude-fable-5"
+
+run env HOME="$CHOME" CLAUDE_CODE_SESSION_ID=no-such-session "$BIN" --current-commander
+assert_contains "current-commander: transcript 無しは unknown" "unknown"
+
+run env -u CLAUDE_CODE_SESSION_ID HOME="$CHOME" "$BIN" --current-commander
+assert_contains "current-commander: session-id 無しは unknown" "unknown"
+
 echo
 echo "PASS: $PASS / FAIL: $FAIL"
 rm -rf "$TMP"

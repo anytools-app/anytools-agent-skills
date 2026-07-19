@@ -24,6 +24,7 @@
 # コスト換算(実費 USD): grok のみ従量課金(input 単価で近似)。codex/agy はサブスク・クォータ内で実費 0。
 #   単体換算: --estimate-cost <cli> <tokens>(単価改定時は cost_usd() の単価を更新)
 # 委任ログの規約確認(読み取り専用): --lint-log
+# 司令塔モデルの解決(委任ログの commander 用。/model 切替を反映): --current-commander
 #   outcome / cause / validation / kind / routing_verdict / delegation_verdict の enum 逸脱を列挙する。
 #
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
@@ -111,6 +112,22 @@ cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(単価未設定・非�
   return 0
 }
 
+# ── 司令塔モデルの解決(transcript の実モデル。/model 切替を反映)──
+# システムプロンプトの model ID は静的で /model 切替に追随しないため使わない。
+# CLAUDE_CODE_SESSION_ID からセッション transcript を引き、直近 assistant ターンの
+# 実モデル(.message.model)を返す。解決不能なら "unknown"。
+resolve_commander() {
+  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  [ -n "$sid" ] || { echo "unknown"; return 0; }
+  local tf
+  tf=$(ls -1 "$HOME/.claude/projects/"*/"$sid.jsonl" 2>/dev/null | head -1)
+  [ -n "$tf" ] && [ -f "$tf" ] || { echo "unknown"; return 0; }
+  local model
+  model=$(grep '"type":"assistant"' "$tf" 2>/dev/null | tail -1 \
+    | jq -r '.message.model // .model // empty' 2>/dev/null)
+  [ -n "$model" ] && echo "$model" || echo "unknown"
+}
+
 # ── 委任ログの enum 検証(読み取り専用)──────────────────
 lint_delegation_log() {
   local log_file="$LOG_DIR/delegation-log.jsonl"
@@ -175,6 +192,10 @@ case "${1:-}" in
     [ $# -eq 1 ] || die "使い方: --lint-log"
     lint_delegation_log
     exit $? ;;
+  --current-commander)
+    [ $# -eq 1 ] || die "使い方: --current-commander"
+    resolve_commander
+    exit 0 ;;
   --cooldowns)
     [ -s "$COOLDOWN_FILE" ] || { echo "cooldown の記録なし"; exit 0; }
     jq -r --arg now "$(iso_now)" \

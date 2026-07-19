@@ -1,7 +1,7 @@
 {
   "name": "anytools-agent-skills",
   "description": "Agent skills for Claude Code by anytools: a delegation protocol routing work to external AI CLIs (OpenAI Codex / xAI Grok / Google Antigravity) with the delegate-run safe runner, and a gated WordPress-to-static (microCMS + Next.js) migration workflow with the wpkit CLI.",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "author": {
     "name": "anytools"
   },
