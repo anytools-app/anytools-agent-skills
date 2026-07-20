@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] - 2026-07-20
+
+### Changed
+
+- **重要・高リスクティアの effort を xhigh → max に変更**(ユーザー方針)。codex adapter の「重要・高リスク」は `gpt-5.6-sol / max`。既存の「max は例外扱い・通常表に入れない」記述を、max の2用途(最難関=難易度の軸 / 重要・高リスク=重要度の軸)として整合。`max` 利用不可時は `xhigh`→`high` へフォールバック
+
 ## [0.16.0] - 2026-07-20
 
 ### Changed
