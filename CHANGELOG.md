@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] - 2026-07-20
+
+### Changed
+
+- **重要・高リスクな対応の実装は司令塔が直接やらず codex sol/xhigh へ委任する**(ユーザー方針)。委任可否ゲートに「重要・高リスクな対応でない」を条件追加し、「小さい/ライブ検証が要る/並行書き込み衝突」を理由にした司令塔の直接実装を止める。司令塔が保持するのは調査・設計・レビュー・コミットで、コード実装は委任する
+- codex adapter のモデル表に**重要度の軸のティア**を追加: 難所(sol/high)とは別に、委任インフラ・ログ健全性・リリース・不可逆・認証/課金/セキュリティ等の重要対応は `gpt-5.6-sol / xhigh`。`xhigh` は GPT-5.6 公式 effort 表に無い値のため、失敗時は `/model` で確認し `high` へ落とす運用を明記
+
 ## [0.15.0] - 2026-07-19
 
 ### Fixed
