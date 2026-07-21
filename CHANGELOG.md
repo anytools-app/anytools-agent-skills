@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] - 2026-07-20
+
+### Changed
+
+- **調査も司令塔が自分でやらず委任する**(ユーザー方針)。原因調査・コードリーディング・棚卸しを司令塔が直接 grep/読解しがちなのを止める。振り分けは**調査対象の場所**で決まる(Codex read-only の sandbox は `--cd`=対象リポジトリに限られるため): リポジトリ内のコード調査 → Codex read-only(標準 terra、深い根本原因は sol)/ リポジトリ外(委任ログ・transcript・~/.claude・env)や広い機械的読み → Claude サブエージェント / Web → Grok / 大規模読解 → Antigravity
+- 役割分担表と委任可否ゲートに反映。司令塔が保持する役割から「調査」を外し、設計・レビュー・採否・コミットに絞る(グローバル CLAUDE.md の「書き込み不要な調査は read-only で codex」を実効化)
+
 ## [0.17.0] - 2026-07-20
 
 ### Changed
