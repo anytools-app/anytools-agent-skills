@@ -259,6 +259,120 @@ CORRECTED="$(jq -r 'select(.run_id=="run_A") | .commander' "$ALOG/delegation-log
 UNTOUCHED="$(jq -r 'select(.run_id=="run_B") | .commander' "$ALOG/delegation-log.jsonl")"
 [ "$UNTOUCHED" = "claude-fable-5" ] && ok || ng "audit-commander --fix: 導入日前 run_B は不変(実際: $UNTOUCHED)"
 
+# ── resumes / rework_of 監査: runs の resume 連鎖と手戻りヒューリスティック ──
+RWMISSING="$TMP/rework-missing"; mkdir -p "$RWMISSING"
+run env DELEGATE_LOG_DIR="$RWMISSING" "$BIN" --audit-rework
+assert_exit "audit-rework: log 不在でも成功" 0
+assert_contains "audit-rework: log 不在を案内" "delegation-log.jsonl が存在しないか空"
+printf '%s\n' '{"date":"2026-07-20","task":"通常実装","kind":"実装","outcome":"採用","resumes":0,"rework_of":null}' \
+  > "$RWMISSING/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RWMISSING" "$BIN" --audit-rework
+assert_exit "audit-rework: runs 不在でも成功" 0
+assert_contains "audit-rework: runs 不在を案内" "runs.jsonl が存在しないか空"
+run env DELEGATE_LOG_DIR="$RWMISSING" "$BIN" --audit-rework --fix
+assert_exit "audit-rework: --fix は拒否" 2
+assert_contains "audit-rework: 引数なし専用の使い方案内" "使い方: --audit-rework"
+
+# 1. 親 resumes=0 だが runs に未計上の resume 実行がある
+RW1="$TMP/rework-1"; mkdir -p "$RW1"
+printf '%s\n' \
+  '{"run_id":"run_parent_1","session_id":"session_parent_1","resume_of":null}' \
+  '{"run_id":"run_resume_1","session_id":"session_resume_1","resume_of":"session_parent_1"}' \
+  > "$RW1/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"通常実装","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"run_parent_1","note":""}' \
+  > "$RW1/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW1" "$BIN" --audit-rework
+assert_exit "audit-rework resumes: 未計上 resume は exit 1" 1
+assert_contains "audit-rework resumes: 行番号・件数・resume run_id を報告" \
+  "resumes不整合: line 1: run_parent_1 resumes=0 だが未計上のresume実行1件(run_resume_1)"
+assert_contains "audit-rework resumes: NG 集計" "NG: 検査1=1件 / 警告=0件 / 情報=0件"
+
+# 2. 親 resumes=1 なら同じ resume 連鎖と整合する
+RW2="$TMP/rework-2"; mkdir -p "$RW2"
+printf '%s\n' \
+  '{"run_id":"run_parent_2","session_id":"session_parent_2","resume_of":null}' \
+  '{"run_id":"run_resume_2","session_id":"session_resume_2","resume_of":"session_parent_2"}' \
+  > "$RW2/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"通常実装","kind":"実装","outcome":"採用","resumes":1,"rework_of":null,"run_id":"run_parent_2","note":""}' \
+  > "$RW2/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW2" "$BIN" --audit-rework
+assert_exit "audit-rework resumes: resumes=1 は成功" 0
+assert_contains "audit-rework resumes: 整合時は OK" "OK: resumes/rework の機械検査に指摘なし"
+assert_not_contains "audit-rework resumes: 整合時は不整合を出さない" "resumes不整合"
+
+# 3. resume 実行が独立した log エントリを持つ場合は親 resumes に要求しない
+RW3="$TMP/rework-3"; mkdir -p "$RW3"
+printf '%s\n' \
+  '{"run_id":"run_parent_3","session_id":"session_parent_3","resume_of":null}' \
+  '{"run_id":"run_resume_3","session_id":"session_parent_3","resume_of":"session_parent_3"}' \
+  > "$RW3/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"親実装","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"run_parent_3","note":""}' \
+  '{"date":"2026-07-20","task":"resumeの独立記録","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"run_resume_3","note":""}' \
+  > "$RW3/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW3" "$BIN" --audit-rework
+assert_exit "audit-rework resumes: 独立 log 記録は成功" 0
+assert_contains "audit-rework resumes: 独立 log 記録時は OK" "OK: resumes/rework の機械検査に指摘なし"
+assert_not_contains "audit-rework resumes: 独立 log 記録を未計上扱いしない" "resumes不整合"
+
+# 4. 丸数字を含む実装 task で rework_of=null は警告(b)
+RW4="$TMP/rework-4"; mkdir -p "$RW4"
+printf '%s\n' '{"run_id":"run_unrelated_4","session_id":"session_unrelated_4","resume_of":null}' > "$RW4/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"プレビュー表示の④を修正","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"","note":""}' \
+  > "$RW4/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW4" "$BIN" --audit-rework
+assert_exit "audit-rework warning(b): 丸数字は exit 1" 1
+assert_contains "audit-rework warning(b): 行番号付きで警告" "rework警告(b): line 1"
+assert_contains "audit-rework warning(b): task を報告" "task「プレビュー表示の④を修正」 rework_of=null"
+assert_contains "audit-rework warning(b): NG 集計" "NG: 検査1=0件 / 警告=1件 / 情報=0件"
+
+# 5. 差し戻し語があっても rework_of 非null なら検出しない
+RW5="$TMP/rework-5"; mkdir -p "$RW5"
+printf '%s\n' '{"run_id":"run_unrelated_5","session_id":"session_unrelated_5","resume_of":null}' > "$RW5/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"差し戻し対応","kind":"実装","outcome":"採用","resumes":0,"rework_of":"run_original","run_id":"","note":""}' \
+  > "$RW5/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW5" "$BIN" --audit-rework
+assert_exit "audit-rework warning(a): rework_of 非null は成功" 0
+assert_contains "audit-rework warning(a): rework_of 非null は OK" "OK: resumes/rework の機械検査に指摘なし"
+assert_not_contains "audit-rework warning(a): rework_of 非null は警告しない" "rework警告(a)"
+
+# 6. 翌日の同名採用は失敗再試行の情報(c)のみで exit 0
+RW6="$TMP/rework-6"; mkdir -p "$RW6"
+printf '%s\n' '{"run_id":"run_unrelated_6","session_id":"session_unrelated_6","resume_of":null}' > "$RW6/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"プレビューのホバーURL表示(初回)","kind":"実装","outcome":"失敗","resumes":0,"rework_of":null,"run_id":"","note":"環境失敗"}' \
+  '{"date":"2026-07-21","task":"プレビューのホバーURL表示(再実行)","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"","note":"再実行"}' \
+  > "$RW6/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW6" "$BIN" --audit-rework
+assert_exit "audit-rework info(c): 情報のみは exit 0" 0
+assert_contains "audit-rework info(c): 採用行を報告" "rework情報(c): line 2"
+assert_contains "audit-rework info(c): 元の失敗行を報告" "line 1 の失敗の再試行(rework_of不要なら問題なし)"
+assert_contains "audit-rework info(c): 情報のみは OK" "OK: resumes/rework の機械検査に指摘なし"
+
+# 差し戻し語が task または note にあり rework_of=null なら警告(a)
+RW7="$TMP/rework-7"; mkdir -p "$RW7"
+printf '%s\n' '{"run_id":"run_unrelated_7","session_id":"session_unrelated_7","resume_of":null}' > "$RW7/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"通常実装の修正","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"","note":"人間からの差し戻しを反映"}' \
+  > "$RW7/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW7" "$BIN" --audit-rework
+assert_exit "audit-rework warning(a): 差し戻し語は exit 1" 1
+assert_contains "audit-rework warning(a): note の差し戻し語を検出" "rework警告(a): line 1"
+
+# 「指摘」+数字も指摘リスト痕跡の警告(b)
+RW8="$TMP/rework-8"; mkdir -p "$RW8"
+printf '%s\n' '{"run_id":"run_unrelated_8","session_id":"session_unrelated_8","resume_of":null}' > "$RW8/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-07-20","task":"レビュー指摘5点を反映","kind":"実装","outcome":"採用","resumes":0,"rework_of":null,"run_id":"","note":""}' \
+  > "$RW8/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RW8" "$BIN" --audit-rework
+assert_exit "audit-rework warning(b): 指摘+数字は exit 1" 1
+assert_contains "audit-rework warning(b): 指摘+数字を検出" "rework警告(b): line 1"
+
 echo
 echo "PASS: $PASS / FAIL: $FAIL"
 rm -rf "$TMP"
