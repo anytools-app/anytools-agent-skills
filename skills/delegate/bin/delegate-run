@@ -26,6 +26,7 @@
 # 委任ログの規約確認(読み取り専用): --lint-log
 # 司令塔モデルの解決(委任ログの commander 用。/model 切替を反映): --current-commander
 # 委任ログの commander を実モデルと突き合わせ(誤記録の検出・訂正): --audit-commander [--fix]
+# 委任ログの resumes / rework_of を runs.jsonl と突き合わせて監査(読み取り専用): --audit-rework
 #   outcome / cause / validation / kind / routing_verdict / delegation_verdict の enum 逸脱を列挙する。
 #
 # 評価ログ(delegation-log.jsonl)には、出力される run_id を --arg run_id で記録して関連付ける。
@@ -196,6 +197,150 @@ audit_commander() {
   return 0
 }
 
+# ── resumes / rework_of の機械監査(読み取り専用・自動修正なし)──
+audit_rework() {
+  local log_file="$LOG_DIR/delegation-log.jsonl"
+  [ -s "$log_file" ] || { echo "delegation-log.jsonl が存在しないか空"; return 0; }
+  [ -s "$RUNS_JSONL" ] || { echo "runs.jsonl が存在しないか空"; return 0; }
+
+  local log_tmp runs_tmp result_tmp
+  log_tmp=$(mktemp); runs_tmp=$(mktemp); result_tmp=$(mktemp)
+
+  # JSONL の物理行番号を保持する。壊れた JSON は --lint-log の対象なのでここでは除外する。
+  if ! jq -Rn '
+      [inputs] | to_entries
+      | map(.key as $i
+          | (.value | fromjson?)
+          | select(type == "object")
+          | . + {__audit_line: ($i + 1)})
+    ' "$log_file" > "$log_tmp" \
+    || ! jq -Rn '[inputs | fromjson? | select(type == "object")]' "$RUNS_JSONL" > "$runs_tmp"; then
+    rm -f "$log_tmp" "$runs_tmp" "$result_tmp"
+    warn "resumes/rework 監査用 JSONL の読み込みに失敗"
+    return 1
+  fi
+
+  if ! jq -n --slurpfile log "$log_tmp" --slurpfile runs "$runs_tmp" '
+      def as_text:
+        if . == null then "" elif type == "string" then . else tostring end;
+      def oneline: as_text | gsub("[\\r\\n\\t]"; " ");
+      def resume_count:
+        if type == "number" then .
+        elif type == "string" then (tonumber? // 0)
+        else 0 end;
+      def day_number:
+        try ((as_text + "T00:00:00Z") | fromdateiso8601 / 86400 | floor) catch null;
+
+      ($log[0]) as $entries
+      | ($runs[0]) as $run_entries
+      | ([
+          $entries[] as $entry
+          | (($entry.run_id // "") | as_text) as $run_id
+          | select($run_id != "")
+          | ([ $run_entries[]
+               | select(((.run_id // "") | as_text) == $run_id)
+             ] | last) as $parent_run
+          | select($parent_run != null)
+          | (($parent_run.session_id // "") | as_text) as $session_id
+          | select($session_id != "")
+          | ([
+              $run_entries[]
+              | select(((.resume_of // "") | as_text) == $session_id)
+              | . as $resume_run
+              | (($resume_run.run_id // "") | as_text) as $resume_run_id
+              | select(
+                  ([ $entries[]
+                     | select($resume_run_id != "" and (((.run_id // "") | as_text) == $resume_run_id))
+                   ] | length) == 0
+                )
+            ]) as $unlogged_resumes
+          | ($entry.resumes | resume_count) as $logged_resumes
+          | ($unlogged_resumes | length) as $expected_min
+          | select($logged_resumes < $expected_min)
+          | {
+              line: $entry.__audit_line,
+              run_id: $run_id,
+              resumes: $logged_resumes,
+              expected_min: $expected_min,
+              resume_run_ids: [
+                $unlogged_resumes[]
+                | ((.run_id // "") | as_text)
+                | if . == "" then "(run_idなし)" else . end
+              ]
+            }
+        ]) as $resume_issues
+      | ([
+          $entries[] as $entry
+          | select($entry.kind == "実装" and $entry.rework_of == null)
+          | (($entry.task // "") | oneline) as $task
+          | (($entry.note // "") | oneline) as $note
+          | (
+              if (($task | contains("差し戻し")) or ($note | contains("差し戻し"))) then
+                {rule: "a", line: $entry.__audit_line, task: $task}
+              else empty end,
+              if ($task | test("[①②③④⑤⑥⑦⑧⑨⑩]|指摘[[:space:]]*[0-9０-９]+")) then
+                {rule: "b", line: $entry.__audit_line, task: $task}
+              else empty end
+            )
+        ]) as $warnings
+      | ([
+          $entries[] as $adopted
+          | select(
+              $adopted.kind == "実装"
+              and $adopted.rework_of == null
+              and ($adopted.outcome == "採用" or $adopted.outcome == "一部採用")
+            )
+          | (($adopted.task // "") | as_text | .[0:12]) as $task_prefix
+          | select($task_prefix != "")
+          | ([
+              $entries[] as $failed
+              | select($failed.__audit_line < $adopted.__audit_line and $failed.outcome == "失敗")
+              | select(((($failed.task // "") | as_text | .[0:12]) == $task_prefix))
+              | (($failed.date // "") | day_number) as $failed_day
+              | (($adopted.date // "") | day_number) as $adopted_day
+              | select($failed_day != null and $adopted_day != null)
+              | ($adopted_day - $failed_day) as $day_delta
+              | select($day_delta >= -1 and $day_delta <= 1)
+              | $failed
+            ] | sort_by(.__audit_line) | last) as $failed_entry
+          | select($failed_entry != null)
+          | {
+              line: $adopted.__audit_line,
+              task: (($adopted.task // "") | oneline),
+              failed_line: $failed_entry.__audit_line
+            }
+        ]) as $infos
+      | {resume_issues: $resume_issues, warnings: $warnings, infos: $infos}
+    ' > "$result_tmp"; then
+    rm -f "$log_tmp" "$runs_tmp" "$result_tmp"
+    warn "resumes/rework 監査の集計に失敗"
+    return 1
+  fi
+
+  local resume_issues warnings infos
+  resume_issues=$(jq -r '.resume_issues | length' "$result_tmp")
+  warnings=$(jq -r '.warnings | length' "$result_tmp")
+  infos=$(jq -r '.infos | length' "$result_tmp")
+
+  jq -r '.resume_issues[]
+    | "resumes不整合: line \(.line): \(.run_id) resumes=\(.resumes) だが未計上のresume実行\(.expected_min)件(\(.resume_run_ids | join(",")))"' \
+    "$result_tmp"
+  jq -r '.warnings[]
+    | "rework警告(\(.rule)): line \(.line): task「\(.task)」 rework_of=null"' \
+    "$result_tmp"
+  jq -r '.infos[]
+    | "rework情報(c): line \(.line): 「\(.task)」は line \(.failed_line) の失敗の再試行(rework_of不要なら問題なし)"' \
+    "$result_tmp"
+
+  rm -f "$log_tmp" "$runs_tmp" "$result_tmp"
+  if [ "$resume_issues" -gt 0 ] || [ "$warnings" -gt 0 ]; then
+    echo "NG: 検査1=${resume_issues}件 / 警告=${warnings}件 / 情報=${infos}件(警告は自動修正しない — 人が判定して rework_of / resumes を訂正する)"
+    return 1
+  fi
+  echo "OK: resumes/rework の機械検査に指摘なし"
+  return 0
+}
+
 # ── 委任ログの enum 検証(読み取り専用)──────────────────
 lint_delegation_log() {
   local log_file="$LOG_DIR/delegation-log.jsonl"
@@ -267,6 +412,10 @@ case "${1:-}" in
   --audit-commander)
     case "${2:-}" in ''|--fix) ;; *) die "使い方: --audit-commander [--fix]" ;; esac
     audit_commander "${2:-}"
+    exit $? ;;
+  --audit-rework)
+    [ $# -eq 1 ] || die "使い方: --audit-rework"
+    audit_rework
     exit $? ;;
   --cooldowns)
     [ -s "$COOLDOWN_FILE" ] || { echo "cooldown の記録なし"; exit 0; }

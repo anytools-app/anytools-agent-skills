@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-07-21
+
+### Added
+
+- **`delegate-run --audit-rework`** を新設: 委任ログの `resumes` を runs.jsonl の resume 連鎖と突き合わせ、独立 log エントリとして記録済みの resume 実行を除外した未計上件数を検出する。`rework_of` は差し戻し語・指摘リスト痕跡を警告し、失敗から1日以内の再実行ペアを情報として区別する。読み取り専用で、自動修正は行わず司令塔の判定と訂正に委ねる。テスト 102→132 件
+
 ## [0.18.0] - 2026-07-20
 
 ### Changed
