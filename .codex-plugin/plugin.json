@@ -1,0 +1,6 @@
+{
+  "name": "anytools-agent-skills-codex",
+  "version": "0.20.0",
+  "description": "Codex-native delegation with tiered Claude Sonnet, Opus, and Fable review.",
+  "skills": "./codex-skills/"
+}

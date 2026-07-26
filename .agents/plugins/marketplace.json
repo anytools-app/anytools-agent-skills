@@ -1,0 +1,20 @@
+{
+  "name": "anytools-agent-skills",
+  "interface": {
+    "displayName": "anytools Agent Skills"
+  },
+  "plugins": [
+    {
+      "name": "anytools-agent-skills-codex",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development"
+    }
+  ]
+}
