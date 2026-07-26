@@ -10,7 +10,6 @@ Claude Code / Codex 用の Agent Skills 集です。各スキルの詳細は**�
 |---|---|
 | [delegate](skills/delegate/README.ja.md) | Claude Code を司令塔にして、外部 AI CLI(OpenAI Codex / xAI Grok / Google Antigravity)へ実装・調査・独立レビューを安全に委任する規約。安全ランナー `delegate-run`(sandbox 必須化・実行記録・limit cooldown)同梱 |
 | [delegate-codex](codex-skills/delegate-codex/README.ja.md) | Codex を司令塔にして native subagent へ調査・実装を委任し、Claude Code CLI を主レビュー役にする規約。read-only レビュー runner、実行記録、cooldown を同梱 |
-| [wordpress-to-200stack](skills/wordpress-to-200stack/README.md) | WordPress サイトを microCMS + Next.js 静的エクスポートへ移行して 200stack に公開する手順。決定的 CLI `wpkit` と品質ゲート同梱 |
 
 ## インストール
 
@@ -27,7 +26,6 @@ claude plugin install anytools-agent-skills
 git clone https://github.com/anytools-app/anytools-agent-skills.git
 cd anytools-agent-skills
 ln -s "$PWD/skills/delegate" ~/.claude/skills/delegate                                  # 使いたいスキルごとに
-ln -s "$PWD/skills/wordpress-to-200stack" ~/.claude/skills/wordpress-to-200stack
 ```
 
 `~/.claude/skills/` 配下は次回セッションから自動で読み込まれ、リポジトリを `git pull` すればスキルも更新されます。スキル固有のセットアップ(delegate の `.env`・司令塔モデル設定など)は各スキルの README を参照してください。

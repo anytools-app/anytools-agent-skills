@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.21.0] - 2026-07-26
+
+### Removed
+
+- **`wordpress-to-200stack` スキルを独立リポジトリ `anytools-app/wordpress-to-200stack` へ分離**。委任規約(delegate / delegate-codex)と WordPress 移行という無関係な2系統が同居していたのを解消する。移管は `git filter-repo` のパス抽出で行い、分離前の45コミットの履歴は移管先に保持されている(このリポジトリの履歴からも消えない)
+- plugin / marketplace マニフェストの description と keywords を委任スキル専用に更新(`200stack` / `microcms` / `migration` / `nextjs` / `static-site` / `wordpress` を削除し、`claude` を追加)。README / README.ja のスキル一覧と symlink 例からも該当行を削除
+
 ## [0.20.0] - 2026-07-22
 
 ### Added

@@ -10,7 +10,6 @@ A collection of Agent Skills for Claude Code and Codex. See **each skill's READM
 |---|---|
 | [delegate](skills/delegate/README.md) | Delegation protocol that turns Claude Code into an orchestrator routing implementation, research, and independent review to external AI CLIs (OpenAI Codex / xAI Grok / Google Antigravity). Ships `delegate-run`, a safe command runner with mandatory sandboxing, run logging, and limit cooldowns |
 | [delegate-codex](codex-skills/delegate-codex/README.md) | Codex-native delegation protocol: native subagents investigate and implement, while Claude Code CLI is the primary independent reviewer. Ships a read-only review runner, run logging, and cooldowns |
-| [wordpress-to-200stack](skills/wordpress-to-200stack/README.md) | Gated workflow migrating WordPress sites to microCMS + Next.js static export deployed on 200stack, with the deterministic `wpkit` CLI included (Japanese only) |
 
 ## Install
 
@@ -25,7 +24,6 @@ Or clone and symlink just the skills you want:
 git clone https://github.com/anytools-app/anytools-agent-skills.git
 cd anytools-agent-skills
 ln -s "$PWD/skills/delegate" ~/.claude/skills/delegate
-ln -s "$PWD/skills/wordpress-to-200stack" ~/.claude/skills/wordpress-to-200stack
 ```
 
 Anything under `~/.claude/skills/` auto-loads next session and updates via `git pull`. Skill-specific setup (delegate's `.env`, orchestrator-model pinning, etc.) is documented in each skill's README.

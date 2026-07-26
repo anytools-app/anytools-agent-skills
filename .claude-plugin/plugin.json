@@ -1,24 +1,19 @@
 {
   "name": "anytools-agent-skills",
-  "description": "Agent skills for Claude Code by anytools: a delegation protocol routing work to external AI CLIs (OpenAI Codex / xAI Grok / Google Antigravity) with the delegate-run safe runner, and a gated WordPress-to-static (microCMS + Next.js) migration workflow with the wpkit CLI.",
-  "version": "0.20.0",
+  "description": "Agent skills for Claude Code and Codex by anytools: delegation protocols routing implementation, research, and independent review to external AI CLIs (OpenAI Codex / xAI Grok / Google Antigravity / Anthropic Claude), with the delegate-run and delegate-review safe runners.",
+  "version": "0.21.0",
   "author": {
     "name": "anytools"
   },
   "homepage": "https://github.com/anytools-app/anytools-agent-skills",
   "license": "MIT",
   "keywords": [
-    "200stack",
     "antigravity",
+    "claude",
     "codex",
     "delegation",
     "grok",
-    "microcms",
-    "migration",
     "multi-agent",
-    "nextjs",
-    "orchestration",
-    "static-site",
-    "wordpress"
+    "orchestration"
   ]
 }
