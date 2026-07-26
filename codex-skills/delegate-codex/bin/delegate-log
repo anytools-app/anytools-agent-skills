@@ -1,0 +1,908 @@
+#!/usr/bin/env bash
+# delegate-codex の task summary / delegation event を JSONL へ安全に記録・監査する。
+
+set -u
+umask 077
+
+die() { echo "delegate-log: ERROR: $*" >&2; exit 2; }
+
+load_local_env() {
+  local path="$1" line key value line_no=0 quote
+  [ ! -L "$path" ] || die "skill .env に symlink は使えない: $path"
+  [ -f "$path" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    case "$line" in
+      ''|\#*) continue ;;
+      *$'\r'*|*$'\t'*) die "skill .env の${line_no}行目に CR/TAB は使えない" ;;
+    esac
+    if [[ "$line" =~ ^(export[[:space:]]+)?(DELEGATE_CODEX_LOG_DIR|CLAUDE_BIN)=(.*)$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      value="${BASH_REMATCH[3]}"
+    else
+      die "skill .env の${line_no}行目は DELEGATE_CODEX_LOG_DIR|CLAUDE_BIN の KEY=value だけを使用できる"
+    fi
+    if [[ "$value" == \"* || "$value" == \'* ]]; then
+      quote="${value:0:1}"
+      [ "${#value}" -ge 2 ] && [ "${value: -1}" = "$quote" ] \
+        || die "skill .env の${line_no}行目に閉じていないquoteがある"
+      value="${value:1:${#value}-2}"
+    fi
+    case "$value" in
+      *'$('*|*'${'*|*'`'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*\\*)
+        die "skill .env の${line_no}行目にshell構文は使えない"
+        ;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done < "$path"
+}
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_LOG_DIR="${DELEGATE_CODEX_LOG_DIR:-}"
+load_local_env "$SKILL_DIR/.env"
+if [ -n "${XDG_STATE_HOME:-}" ]; then
+  DEFAULT_LOG_DIR="$XDG_STATE_HOME/delegate-codex"
+elif [ "$(uname -s)" = Darwin ]; then
+  DEFAULT_LOG_DIR="$HOME/Library/Logs/delegate-codex"
+else
+  DEFAULT_LOG_DIR="$HOME/.local/state/delegate-codex"
+fi
+LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_CODEX_LOG_DIR:-$DEFAULT_LOG_DIR}}"
+LOG_FILE="$LOG_DIR/delegation-log.jsonl"
+RUNS_FILE="$LOG_DIR/runs.jsonl"
+
+iso_now() { date -u +%FT%TZ; }
+
+new_id() {
+  local prefix="$1" raw
+  raw=""
+  if command -v uuidgen >/dev/null 2>&1; then
+    raw="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f' | cut -c1-8 || true)"
+  fi
+  case "$raw" in
+    ????????) ;;
+    *)
+    raw="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    ;;
+  esac
+  case "$raw" in
+    ????????) ;;
+    *) die "安全なローカル ID を生成できない" ;;
+  esac
+  printf '%s_%s_%s\n' "$prefix" "$(date -u +%Y%m%d-%H%M%S)" "$raw"
+}
+
+validate_log_location() {
+  local check_dir check_parent
+  case "$LOG_DIR" in /*) ;; *) die "DELEGATE_CODEX_LOG_DIR は絶対パスにする: $LOG_DIR" ;; esac
+  check_dir="$LOG_DIR"
+  [ -d "$check_dir" ] || check_dir="$(dirname "$check_dir")"
+  while [ ! -d "$check_dir" ]; do
+    check_parent="$(dirname "$check_dir")"
+    [ "$check_parent" != "$check_dir" ] || die "ログ先の親ディレクトリを解決できない: $LOG_DIR"
+    check_dir="$check_parent"
+  done
+  if git -C "$check_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "委任評価ログは git worktree 外へ置く: $LOG_DIR"
+  fi
+}
+
+reject_log_symlink() {
+  local path="$1" label="$2"
+  [ ! -L "$path" ] || die "${label}に symlink は使えない: $path"
+}
+
+ensure_log_dir() {
+  local mkdir_error
+  mkdir_error="$(mkdir -p "$LOG_DIR" 2>&1)" \
+    || die "ログ先へ書き込めない: $LOG_DIR: ${mkdir_error}。同一コマンドを sandbox escalation で再実行する。ログ先変更はユーザー明示設定のみ"
+}
+
+require_readable_jsonl() {
+  local path="$1" label="$2"
+  [ -f "$path" ] || die "$label が見つからない: $path"
+  [ -r "$path" ] || die "$label を読み取れない: $path"
+  jq -c . "$path" >/dev/null 2>&1 || die "$label に解析不能な JSONL がある: $path"
+}
+
+lock_path() {
+  printf '%s.lock\n' "$LOG_FILE"
+}
+
+acquire_log_lock() {
+  local lock owner tries=0
+  lock="$(lock_path)"
+  owner="$lock/owner"
+  while ! mkdir "$lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 40 ] || die "ログlockを取得できない: ${lock}。既存lockは自動削除しないため、実行中のdelegate-logがないことを確認してから手動で確認する"
+    sleep 0.05
+  done
+  if ! printf '%s\n%s\n' "$$" "$(date +%s)" > "$owner"; then
+    rm -f "$owner" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+    die "ログlock ownerを書き込めない: $owner"
+  fi
+  LOG_LOCK_DIR="$lock"
+}
+
+release_log_lock() {
+  if [ -n "${LOG_LOCK_DIR:-}" ]; then
+    rm -f "$LOG_LOCK_DIR/owner" 2>/dev/null || true
+    rmdir "$LOG_LOCK_DIR" 2>/dev/null || true
+    LOG_LOCK_DIR=""
+  fi
+}
+
+with_log_lock() {
+  acquire_log_lock
+  trap 'release_log_lock' EXIT
+}
+
+valid_routing_for() {
+  local required="$1" actual="$2"
+  if [ "$required" = none ]; then
+    if [ "$actual" = none ]; then printf '適正\n'; else printf '過剰\n'; fi
+  elif [ "$actual" = none ]; then
+    printf '過小\n'
+  else
+    local req_rank act_rank
+    case "$required" in sonnet) req_rank=1 ;; opus) req_rank=2 ;; fable) req_rank=3 ;; *) req_rank=0 ;; esac
+    case "$actual" in sonnet) act_rank=1 ;; opus) act_rank=2 ;; fable) act_rank=3 ;; *) act_rank=0 ;; esac
+    if [ "$act_rank" -lt "$req_rank" ]; then printf '過小\n'
+    elif [ "$act_rank" -gt "$req_rank" ]; then printf '過剰\n'
+    else printf '適正\n'
+    fi
+  fi
+}
+
+valid_review_status_for() {
+  local required="$1" actual="$2"
+  if [ "$required" = none ]; then
+    if [ "$actual" = none ]; then
+      if [ "$KIND" = 実装 ] || [ "$KIND" = レビュー ]; then printf 'skipped_low_risk\n'; else printf 'not_required\n'; fi
+    else
+      printf 'completed\n'
+    fi
+  elif [ "$actual" = none ]; then
+    printf 'blocked_approval\n'
+  else
+    printf 'completed\n'
+  fi
+}
+
+audit_delegations() {
+  local issues output event_count effective_event_count summary_count correction_count
+  validate_log_location
+  reject_log_symlink "$LOG_FILE" "委任評価ログ"
+  if [ ! -e "$LOG_FILE" ]; then
+    echo "delegation audit: physical_events=0 effective_events=0 corrections=0 summaries=0 issues=0"
+    return 0
+  fi
+  require_readable_jsonl "$LOG_FILE" "委任評価ログ"
+  event_count="$(jq -s '[.[] | select(.record_type == "delegation_event")] | length' "$LOG_FILE")"
+  correction_count="$(jq -s '[.[] | select(.record_type == "delegation_correction")] | length' "$LOG_FILE")"
+  summary_count="$(jq -s '[.[] | select(.record_type == "task_summary")] | length' "$LOG_FILE")"
+  if ! effective_event_count="$(jq -s '
+    def correction_issue($rows; $c):
+      ((($c.correction // "") | IN("voided","supersedes") | not) or
+       (($c.target_delegation_id // "") | type) != "string" or ($c.target_delegation_id // "") == "" or
+       (($c.reason // "") | IN("historical_bad_lifecycle","operator_error","duplicate_record","unknown") | not) or
+       ($c.correction == "supersedes" and ((($c.replacement_delegation_id // "") | type) != "string" or ($c.replacement_delegation_id // "") == "")) or
+       ($c.correction == "voided" and (($c.replacement_delegation_id // "") != "" and ($c.replacement_delegation_id != null))) or
+       (($c.replacement_delegation_id // "") != "" and $c.target_delegation_id == $c.replacement_delegation_id) or
+       ([($rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.target_delegation_id))] | length) == 0);
+    def valid_replacement($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(.event == "completed" or .event == "failed") ] | length) == 1 and
+        (([ $g[] | select(.event == "completed" or .event == "failed") ] | first | .event) != null);
+    def healthy_open_delegation($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(.event == "completed" or .event == "failed") ] | length) == 0;
+    def valid_corrections($rows):
+      [$rows[] | select(.record_type == "delegation_correction")] as $cs
+      | [$cs[] as $c
+          | select(([$cs[] | select(.target_delegation_id == $c.target_delegation_id)] | length) == 1)
+          | select(correction_issue($rows; $c) | not)
+          | select(healthy_open_delegation($rows; $c.target_delegation_id) | not)
+          | select($c.correction != "supersedes" or
+              (([$rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.replacement_delegation_id)] | length) > 0 and
+               ([$cs[] | select(.target_delegation_id == $c.replacement_delegation_id)] | length) == 0 and
+               valid_replacement($rows; $c.replacement_delegation_id)))
+          | $c]
+      ;
+    . as $rows
+    | (valid_corrections($rows) | map(.target_delegation_id) | unique) as $retired
+    | [$rows[] | select(.record_type == "delegation_event" and ((.delegation_id as $id | $retired | index($id)) | not))] | length' "$LOG_FILE")"; then
+    die "委任評価ログの effective event count に失敗: $LOG_FILE"
+  fi
+  if ! output="$(jq -sr '
+    def issue($code; $id; $detail): "\($code)\t\($id)\t\($detail)";
+    def valid_replacement($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(.event == "completed" or .event == "failed") ] | length) == 1;
+    def healthy_open_delegation($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(.event == "completed" or .event == "failed") ] | length) == 0;
+    def correction_issue($rows; $corrections; $c):
+      if $c.schema_version != 2 then issue("invalid_correction"; ($c.target_delegation_id // "(missing)"); "schema_version must be 2")
+      elif (($c.correction // "") | IN("voided","supersedes") | not) then issue("invalid_correction"; ($c.target_delegation_id // "(missing)"); "correction invalid at line \($c.__line)")
+      elif (($c.target_delegation_id // "") | type) != "string" or ($c.target_delegation_id // "") == "" then issue("invalid_correction"; "(missing)"; "target_delegation_id missing at line \($c.__line)")
+      elif (($c.reason // "") | IN("historical_bad_lifecycle","operator_error","duplicate_record","unknown") | not) then issue("invalid_correction"; $c.target_delegation_id; "reason invalid at line \($c.__line)")
+      elif $c.correction == "voided" and (($c.replacement_delegation_id // "") != "" and $c.replacement_delegation_id != null) then issue("invalid_correction"; $c.target_delegation_id; "voided cannot set replacement_delegation_id at line \($c.__line)")
+      elif $c.correction == "supersedes" and ((($c.replacement_delegation_id // "") | type) != "string" or ($c.replacement_delegation_id // "") == "") then issue("invalid_correction"; $c.target_delegation_id; "supersedes replacement_delegation_id missing at line \($c.__line)")
+      elif (($c.replacement_delegation_id // "") != "" and $c.target_delegation_id == $c.replacement_delegation_id) then issue("invalid_correction"; $c.target_delegation_id; "self-target correction at line \($c.__line)")
+      elif ([($rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.target_delegation_id))] | length) == 0 then issue("unknown_correction_target"; $c.target_delegation_id; "target delegation not found at line \($c.__line)")
+      elif ([$corrections[] | select(.target_delegation_id == $c.target_delegation_id)] | length) > 1 then issue("duplicate_correction_target"; $c.target_delegation_id; "target has multiple corrections")
+      elif healthy_open_delegation($rows; $c.target_delegation_id) then issue("healthy_open_correction_target"; $c.target_delegation_id; "healthy open delegation cannot be corrected at line \($c.__line)")
+      elif $c.correction == "supersedes" and ([($rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.replacement_delegation_id))] | length) == 0 then issue("unknown_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation not found at line \($c.__line)")
+      elif $c.correction == "supersedes" and ([$corrections[] | select(.target_delegation_id == $c.replacement_delegation_id)] | length) > 0 then issue("retired_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation is retired at line \($c.__line)")
+      elif $c.correction == "supersedes" and (valid_replacement($rows; $c.replacement_delegation_id) | not) then issue("invalid_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation lifecycle invalid at line \($c.__line)")
+      else empty end;
+    def valid_correction($rows; $corrections; $c):
+      ([correction_issue($rows; $corrections; $c)] | length) == 0;
+    . as $rows
+    | [to_entries[] | .key as $line | .value
+      | select(.record_type == "delegation_event")
+      | . + {__line: ($line + 1)}] as $physical_events
+    | [to_entries[] | .key as $line | .value
+      | select(.record_type == "delegation_correction")
+      | . + {__line: ($line + 1)}] as $corrections
+    | ([$corrections[] as $c | select(valid_correction($rows; $corrections; $c)) | $c.target_delegation_id] | unique) as $retired
+    | [$physical_events[] | select((.delegation_id as $id | $retired | index($id)) | not)] as $events
+    | [to_entries[] | .key as $line | .value
+      | select(.record_type == "task_summary")
+      | . + {__line: ($line + 1)}] as $summaries
+    | [$corrections[] as $c | correction_issue($rows; $corrections; $c)] as $correction_issues
+    | [$physical_events[] |
+        if .schema_version != 2 then
+          issue("invalid_event"; (.delegation_id // "(missing)"); "schema_version must be 2")
+        elif ((.repo // "") | type) != "string" or (.repo // "") == "" then
+          issue("invalid_event"; (.delegation_id // "(missing)"); "repo missing")
+        elif ((.task // "") | type) != "string" or (.task // "") == "" then
+          issue("invalid_event"; (.delegation_id // "(missing)"); "task missing")
+        elif ((.task_id // "") | type) != "string" or (.task_id // "") == "" then
+          issue("invalid_event"; (.delegation_id // "(missing)"); "task_id missing")
+        elif ((.delegation_id // "") | type) != "string" or (.delegation_id // "") == "" then
+          issue("invalid_event"; "(missing)"; "delegation_id missing")
+        elif ((.event // "") | IN("dispatched","followup","completed","failed") | not) then
+          issue("invalid_event"; .delegation_id; "event invalid at line \(.__line)")
+        elif ((.subagent_role // "") | type) != "string" then
+          issue("invalid_event"; .delegation_id; "subagent_role invalid at line \(.__line)")
+        elif ((.subagent_role | test("^[A-Za-z0-9_-]+$")) | not) then
+          issue("invalid_event"; .delegation_id; "subagent_role invalid at line \(.__line)")
+        elif ((.agent_task_name // "") | type) != "string" or (.agent_task_name // "") == "" then
+          issue("invalid_event"; .delegation_id; "agent_task_name missing at line \(.__line)")
+        elif ((.agent // "") | IN("codex-native","claude","grok","agy") | not) then
+          issue("invalid_event"; .delegation_id; "agent invalid at line \(.__line)")
+        elif ((.attempt // null) | type) != "number" then
+          issue("invalid_attempt"; .delegation_id; "attempt invalid at line \(.__line)")
+        elif ((.attempt | floor) != .attempt) or .attempt < 1 then
+          issue("invalid_attempt"; .delegation_id; "attempt invalid at line \(.__line)")
+        elif .event == "dispatched" and .attempt != 1 then
+          issue("invalid_attempt"; .delegation_id; "dispatched attempt must be 1")
+        elif .event == "dispatched" and ((.ownership // "") | type) != "string" then
+          issue("invalid_event"; .delegation_id; "dispatched ownership missing")
+        elif .event == "dispatched" and (.ownership // "") == "" then
+          issue("invalid_event"; .delegation_id; "dispatched ownership missing")
+        elif .event == "followup" and .attempt < 2 then
+          issue("invalid_attempt"; .delegation_id; "followup attempt must be >=2")
+        elif (.event == "dispatched" or .event == "followup") and
+             (.outcome != "未完了" or .validation != "not_run") then
+          issue("invalid_event"; .delegation_id; "\(.event) outcome/validation invalid")
+        elif .event == "completed" and
+             (((.outcome | IN("採用","一部採用","破棄")) | not) or
+              ((.validation | IN("pass","no_new_failures")) | not)) then
+          issue("invalid_event"; .delegation_id; "completed outcome/validation invalid")
+        elif .event == "failed" and
+             (((.outcome | IN("失敗","未完了")) | not) or
+              ((.validation | IN("fail","not_run")) | not) or
+              (.cause // "none") == "none") then
+          issue("invalid_event"; .delegation_id; "failed outcome/validation/cause invalid")
+        else empty end
+      ] as $field_issues
+    | [$events | group_by(.delegation_id // "")[] |
+        . as $group | ($group[0].delegation_id // "(missing)") as $id
+        | ([.[] | select(.event == "dispatched")] | length) as $dispatches
+        | ([.[] | select(.event == "completed" or .event == "failed")] | length) as $terminals
+        | ([.[] | select(.event == "completed" or .event == "failed") | .__line] | min // null) as $terminal_line
+        | if $dispatches == 0 and $terminals > 0 then issue("terminal_without_dispatch"; $id; "terminal exists without dispatch")
+          elif $dispatches != 1 then issue("dispatch_count"; $id; "expected 1 dispatch, got \($dispatches)")
+          else empty end,
+          if $terminals == 0 then issue("unclosed"; $id; "terminal event missing")
+          elif $terminals > 1 then issue("duplicate_terminal"; $id; "expected 1 terminal, got \($terminals)")
+          else empty end,
+          if $terminal_line != null and ([.[] | select(.__line > $terminal_line)] | length) > 0
+          then issue("event_after_terminal"; $id; "event exists after terminal")
+          else empty end,
+          ([.[] | .attempt] | map(select(type == "number" and floor == . and . >= 1))) as $attempts
+          | if ($attempts | length) > 1 and any(range(1; $attempts|length); $attempts[.] < $attempts[.-1])
+            then issue("invalid_attempt"; $id; "attempts must not decrease in log order")
+            else empty end
+      ] as $transition_issues
+    | ([$events[] | .task_id | select(type == "string" and . != "")] | unique) as $task_ids
+    | [$task_ids[] as $task_id
+        | ([$events[] | select(.task_id == $task_id) | .__line] | max) as $last_event_line
+        | ([$summaries[] | select(.task_id == $task_id) | .__line] | max // null) as $last_summary_line
+        | if $last_summary_line == null then
+            issue("summary_missing"; $task_id; "task_summary missing")
+          elif $last_summary_line <= $last_event_line then
+            issue("summary_before_close"; $task_id; "latest task_summary must follow every delegation event")
+          else empty end
+      ] as $summary_issues
+    | ($correction_issues + $field_issues + $transition_issues + $summary_issues)[]' "$LOG_FILE")"
+  then
+    die "委任評価ログの delegation audit に失敗: $LOG_FILE"
+  fi
+  if [ -n "$output" ]; then
+    issues="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
+    printf '%s\n' "$output"
+    echo "delegation audit: physical_events=$event_count effective_events=$effective_event_count corrections=$correction_count summaries=$summary_count issues=$issues"
+    return 1
+  fi
+  echo "delegation audit: physical_events=$event_count effective_events=$effective_event_count corrections=$correction_count summaries=$summary_count issues=0"
+}
+
+audit_run_ids() {
+  local refs issues output run_count missing_output comparison_output
+  validate_log_location
+  reject_log_symlink "$LOG_FILE" "委任評価ログ"
+  reject_log_symlink "$RUNS_FILE" "runs.jsonl"
+  if [ ! -e "$LOG_FILE" ]; then
+    echo "run-id audit: references=0 runs=0 issues=0"
+    return 0
+  fi
+  require_readable_jsonl "$LOG_FILE" "委任評価ログ"
+  refs="$(jq -s '[.[] | select(.agent == "claude" and .run_id != null and .run_id != "")] | length' "$LOG_FILE")"
+  if ! missing_output="$(jq -r '
+    def needs_run_id:
+      .agent == "claude" and
+      (.approval_basis == "explicit" or .approval_basis == "standing") and
+      ((.record_type == "delegation_event" and .event == "completed") or
+       (.record_type != "delegation_event" and
+        ((.outcome | IN("採用","一部採用","破棄")) or
+         (.validation | IN("pass","no_new_failures")))));
+    select(needs_run_id and ((((.run_id // "") | type) != "string") or (.run_id // "") == ""))
+    | "missing_claude_run_id\t\(.delegation_id // .task_id // "(no-id)")\tsuccessful explicit/standing Claude review requires run_id"' "$LOG_FILE")"
+  then
+    die "委任評価ログの Claude run_id 必須監査に失敗: $LOG_FILE"
+  fi
+  if [ "$refs" -eq 0 ]; then
+    if [ -n "$missing_output" ]; then
+      issues="$(printf '%s\n' "$missing_output" | wc -l | tr -d ' ')"
+      printf '%s\n' "$missing_output"
+      echo "run-id audit: references=0 runs=0 issues=$issues"
+      return 1
+    fi
+    echo "run-id audit: references=0 runs=0 issues=0"
+    return 0
+  fi
+  require_readable_jsonl "$RUNS_FILE" "Claude run log"
+  run_count="$(jq -s 'length' "$RUNS_FILE")"
+  if ! comparison_output="$(jq -nr --slurpfile logs "$LOG_FILE" --slurpfile runs "$RUNS_FILE" '
+    def issue($code; $id; $detail): "\($code)\t\($id)\t\($detail)";
+    [$logs[] | select(.agent == "claude" and .run_id != null and .run_id != "")][] as $log
+    | [$runs[] | select(.run_id == $log.run_id)] as $matches
+    | if ($matches | length) == 0 then
+        issue("missing_run_id"; $log.run_id; "runs.jsonl entry missing")
+      elif (($log.model // "") | type) == "string" and
+           (($log.model // "") != "" and ($log.model // "") != "unknown") and
+           all($matches[]; .model != $log.model) then
+        issue("model_mismatch"; $log.run_id; "delegation=\($log.model) run=\($matches[0].model)")
+      elif (($log.effort // "") | type) == "string" and
+           (($log.effort // "") != "" and ($log.effort // "") != "unknown") and
+           all($matches[]; .effort != $log.effort) then
+        issue("effort_mismatch"; $log.run_id; "delegation=\($log.effort) run=\($matches[0].effort)")
+      elif $log.approval_basis == "standing" and
+           ($log.model != "fable" or $log.effort != "high" or all($matches[]; .model != "fable" or .effort != "high")) then
+        issue("standing_mismatch"; $log.run_id; "standing requires fable/high")
+      else empty end' </dev/null)"
+  then
+    die "委任評価ログの run-id audit に失敗: $LOG_FILE"
+  fi
+  output="$missing_output"
+  if [ -n "$comparison_output" ]; then
+    if [ -n "$output" ]; then
+      output="${output}"$'\n'"${comparison_output}"
+    else
+      output="$comparison_output"
+    fi
+  fi
+  if [ -n "$output" ]; then
+    issues="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
+    printf '%s\n' "$output"
+    echo "run-id audit: references=$refs runs=$run_count issues=$issues"
+    return 1
+  fi
+  echo "run-id audit: references=$refs runs=$run_count issues=0"
+}
+
+audit_routing() {
+  local output issues summary_count
+  validate_log_location
+  reject_log_symlink "$LOG_FILE" "委任評価ログ"
+  if [ ! -e "$LOG_FILE" ]; then
+    echo "routing audit: summaries=0 issues=0"
+    return 0
+  fi
+  require_readable_jsonl "$LOG_FILE" "委任評価ログ"
+  summary_count="$(jq -s '[.[] | select(.record_type == "task_summary")] | length' "$LOG_FILE")"
+  if ! output="$(jq -r '
+    def issue($code; $id; $detail): "\($code)\t\($id)\t\($detail)";
+    def rank($m): if $m == "sonnet" then 1 elif $m == "opus" then 2 elif $m == "fable" then 3 else 0 end;
+    def required:
+      if (((.note // "") | contains("tier=最重要")) or (.approval_basis == "standing" and .model == "fable")) then "fable"
+      elif ((.kind == "実装" or .kind == "レビュー") and (.agent != "grok" and .agent != "agy") and .risk == "高") then "opus"
+      elif ((.kind == "実装" or .kind == "レビュー") and (.agent != "grok" and .agent != "agy") and .risk == "標準") then "sonnet"
+      else "none" end;
+    def actual:
+      if .agent == "claude" and ((.model // "") | IN("sonnet","opus","fable")) then .model else "none" end;
+    def routing($req; $act):
+      if $req == "none" then (if $act == "none" then "適正" else "過剰" end)
+      elif $act == "none" then "過小"
+      elif (rank($act) < rank($req)) then "過小"
+      elif (rank($act) > rank($req)) then "過剰"
+      else "適正" end;
+    def status($req; $act):
+      if $req == "none" then
+        if $act == "none" then (if (.kind == "実装" or .kind == "レビュー") then "skipped_low_risk" else "not_required" end) else "completed" end
+      elif $act == "none" then "blocked_approval"
+      else "completed" end;
+    select(.record_type == "task_summary")
+    | select(((has("required_model") | not) and (has("actual_model") | not) and (has("review_status") | not)) | not)
+    | (required) as $req | (actual) as $act | (routing($req; $act)) as $routing | (status($req; $act)) as $status
+    | if ((.required_model // "") | IN("none","sonnet","opus","fable") | not) then issue("invalid_routing"; (.task_id // "(no-task-id)"); "required_model invalid")
+      elif ((.actual_model // "") | IN("none","sonnet","opus","fable") | not) then issue("invalid_routing"; (.task_id // "(no-task-id)"); "actual_model invalid")
+      elif ((.review_status // "") | IN("completed","blocked_approval","skipped_low_risk","not_required") | not) then issue("invalid_routing"; (.task_id // "(no-task-id)"); "review_status invalid")
+      elif .required_model != $req then issue("routing_required_mismatch"; (.task_id // "(no-task-id)"); "required_model=\(.required_model) expected=\($req)")
+      elif .actual_model != $act then issue("routing_actual_mismatch"; (.task_id // "(no-task-id)"); "actual_model=\(.actual_model) expected=\($act)")
+      elif .review_status != $status then issue("routing_status_mismatch"; (.task_id // "(no-task-id)"); "review_status=\(.review_status) expected=\($status)")
+      elif .routing_verdict != $routing then issue("routing_verdict_mismatch"; (.task_id // "(no-task-id)"); "routing_verdict=\(.routing_verdict) expected=\($routing)")
+      elif $req == "fable" and $act != "fable" and ((.outcome | IN("未完了","失敗")) | not) then issue("critical_review_absent_outcome"; (.task_id // "(no-task-id)"); "required fable missing/lower review requires outcome 未完了|失敗")
+      else empty end' "$LOG_FILE")"
+  then
+    die "委任評価ログの routing audit に失敗: $LOG_FILE"
+  fi
+  if [ -n "$output" ]; then
+    issues="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
+    printf '%s\n' "$output"
+    echo "routing audit: summaries=$summary_count issues=$issues"
+    return 1
+  fi
+  echo "routing audit: summaries=$summary_count issues=0"
+}
+
+validate_preappend_state() {
+  local tmp record="$1" output
+  [ ! -d "$LOG_FILE" ] || return 0
+  [ ! -e "$LOG_FILE" ] || require_readable_jsonl "$LOG_FILE" "委任評価ログ"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/delegate-log-preappend.XXXXXX")" || die "preappend検証用一時ファイルを作成できない"
+  if [ -e "$LOG_FILE" ]; then
+    cat "$LOG_FILE" > "$tmp" || { rm -f "$tmp"; die "preappend検証用にログを読めない: $LOG_FILE"; }
+  fi
+  printf '%s\n' "$record" >> "$tmp" || { rm -f "$tmp"; die "preappend検証用recordを書けない"; }
+  if ! output="$(jq -sr '
+    def issue($code; $id; $detail): "\($code)\t\($id)\t\($detail)";
+    def terminal: .event == "completed" or .event == "failed";
+    def valid_replacement($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(terminal) ] | length) == 1;
+    def healthy_open_delegation($rows; $id):
+      [$rows[] | select(.record_type == "delegation_event" and .delegation_id == $id)] as $g
+      | ([ $g[] | select(.event == "dispatched") ] | length) == 1 and
+        ([ $g[] | select(terminal) ] | length) == 0;
+    def base_correction_issue($rows; $corrections; $c):
+      if ((($c.correction // "") | IN("voided","supersedes") | not)) then issue("invalid_correction"; ($c.target_delegation_id // "(missing)"); "correction invalid")
+      elif ((($c.target_delegation_id // "") | type) != "string" or ($c.target_delegation_id // "") == "") then issue("invalid_correction"; "(missing)"; "target_delegation_id missing")
+      elif ((($c.reason // "") | IN("historical_bad_lifecycle","operator_error","duplicate_record","unknown") | not)) then issue("invalid_correction"; $c.target_delegation_id; "reason invalid")
+      elif $c.correction == "voided" and ((($c.replacement_delegation_id // "") != "") and $c.replacement_delegation_id != null) then issue("invalid_correction"; $c.target_delegation_id; "voided cannot set replacement_delegation_id")
+      elif $c.correction == "supersedes" and (((($c.replacement_delegation_id // "") | type) != "string") or ($c.replacement_delegation_id // "") == "") then issue("invalid_correction"; $c.target_delegation_id; "supersedes replacement_delegation_id missing")
+      elif (($c.replacement_delegation_id // "") != "" and $c.target_delegation_id == $c.replacement_delegation_id) then issue("invalid_correction"; $c.target_delegation_id; "self-target correction")
+      elif ([($rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.target_delegation_id))] | length) == 0 then issue("unknown_correction_target"; $c.target_delegation_id; "target delegation not found")
+      elif ([$corrections[] | select(.target_delegation_id == $c.target_delegation_id)] | length) > 1 then issue("duplicate_correction_target"; $c.target_delegation_id; "target has multiple corrections")
+      elif healthy_open_delegation($rows; $c.target_delegation_id) then issue("healthy_open_correction_target"; $c.target_delegation_id; "healthy open delegation cannot be corrected")
+      elif $c.correction == "supersedes" and ([($rows[] | select(.record_type == "delegation_event" and .delegation_id == $c.replacement_delegation_id))] | length) == 0 then issue("unknown_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation not found")
+      elif $c.correction == "supersedes" and ([$corrections[] | select(.target_delegation_id == $c.replacement_delegation_id)] | length) > 0 then issue("retired_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation is retired")
+      elif $c.correction == "supersedes" and (valid_replacement($rows; $c.replacement_delegation_id) | not) then issue("invalid_replacement_delegation"; $c.replacement_delegation_id; "replacement delegation lifecycle invalid")
+      else empty end;
+    def valid_correction($rows; $corrections; $c): ([base_correction_issue($rows; $corrections; $c)] | length) == 0;
+    . as $rows
+    | ($rows[-1]) as $new
+    | [to_entries[] | .key as $line | .value | select(.record_type == "delegation_event") | . + {__line: ($line + 1)}] as $physical_events
+    | [to_entries[] | .key as $line | .value | select(.record_type == "delegation_correction") | . + {__line: ($line + 1)}] as $corrections
+    | ([$corrections[] as $c | select(valid_correction($rows; $corrections; $c)) | $c.target_delegation_id] | unique) as $retired
+    | [$physical_events[] | select((.delegation_id as $id | $retired | index($id)) | not)] as $events
+    | if $new.record_type == "delegation_event" then
+        ($new.delegation_id) as $id
+        | ([$events[] | select(.delegation_id == $id)]) as $group
+        | ([$group[] | select(.event == "dispatched")] | length) as $dispatches
+        | ([$group[] | select(terminal)] | length) as $terminals
+        | ([$group[] | select(terminal) | .__line] | min // null) as $terminal_line
+        | if (($retired | index($id)) != null) then issue("retired_delegation"; $id; "corrected delegation cannot receive new events")
+          elif $new.event == "dispatched" and $dispatches > 1 then issue("duplicate_dispatch"; $id; "dispatch already exists")
+          elif ($new.event == "followup" and $dispatches == 0) then issue("followup_without_dispatch"; $id; "followup requires dispatch")
+          elif ($new.event == "followup" and $terminal_line != null) then issue("followup_after_terminal"; $id; "followup after terminal")
+          elif (($new.event == "completed" or $new.event == "failed") and $dispatches == 0) then issue("terminal_without_dispatch"; $id; "terminal requires dispatch")
+          elif (($new.event == "completed" or $new.event == "failed") and $terminals > 1) then issue("terminal_after_terminal"; $id; "terminal already exists")
+          else empty end
+      elif $new.record_type == "task_summary" and (($new.task_id // "") != "") then
+        [[$events[] | select(.task_id == $new.task_id)] | group_by(.delegation_id)[]?
+          | . as $g
+          | ([.[] | select(.event == "dispatched")] | length) as $d
+          | ([.[] | select(terminal)] | length) as $t
+          | select($d > 0 and $t == 0)
+          | issue("summary_with_unclosed_delegation"; ($g[0].task_id // "(no-task-id)"); "task_summary cannot be appended while effective delegations are unclosed")] | .[]
+      elif $new.record_type == "delegation_correction" then
+        base_correction_issue($rows; $corrections; $new)
+      else empty end' "$tmp")"
+  then
+    rm -f "$tmp"
+    die "preappend lifecycle validation に失敗"
+  fi
+  rm -f "$tmp"
+  if [ -n "$output" ]; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
+REPO="" TASK="" TASK_ID="" DELEGATION_ID="" PARENT_DELEGATION_ID=""
+KIND="" AGENT="" MODEL="" EFFORT="unknown" RISK="" OUTCOME="" VALIDATION=""
+ROUTING="" CAUSE="" RUN_ID="" NOTE="" COMMANDER_MODEL="unknown"
+RECORD_TYPE="task_summary" RECORD_TYPE_SET=false EVENT=""
+SUBAGENT_ROLE="" AGENT_TASK_NAME="" OWNERSHIP="" ATTEMPT=""
+APPROVAL_BASIS="none"
+CORRECTION="" TARGET_DELEGATION_ID="" REPLACEMENT_DELEGATION_ID="" CORRECTION_REASON=""
+REQUIRED_MODEL="" REQUIRED_MODEL_SET=false ACTUAL_MODEL="" ACTUAL_MODEL_SET=false
+REVIEW_STATUS="" REVIEW_STATUS_SET=false ROUTING_SET=false
+RESUMES=0 SCOPE_VIOLATION=false REVIEW_FINDINGS=""
+MODE="record"
+MODE_COUNT=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --new-task-id) MODE="new-task-id"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --new-delegation-id) MODE="new-delegation-id"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --audit-delegations) MODE="audit-delegations"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --audit-run-ids) MODE="audit-run-ids"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --audit-routing) MODE="audit-routing"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --audit-all) MODE="audit-all"; MODE_COUNT=$((MODE_COUNT + 1)); shift ;;
+    --record-type) RECORD_TYPE="${2:?}"; RECORD_TYPE_SET=true; shift 2 ;;
+    --event) EVENT="${2:?}"; shift 2 ;;
+    --task-id) TASK_ID="${2:?}"; shift 2 ;;
+    --delegation-id) DELEGATION_ID="${2:?}"; shift 2 ;;
+    --parent-delegation-id) PARENT_DELEGATION_ID="${2:?}"; shift 2 ;;
+    --subagent-role) SUBAGENT_ROLE="${2:?}"; shift 2 ;;
+    --agent-task-name) AGENT_TASK_NAME="${2:?}"; shift 2 ;;
+    --ownership) OWNERSHIP="${2:?}"; shift 2 ;;
+    --attempt) ATTEMPT="${2:?}"; shift 2 ;;
+    --repo) REPO="${2:?}"; shift 2 ;;
+    --task) TASK="${2:?}"; shift 2 ;;
+    --kind) KIND="${2:?}"; shift 2 ;;
+    --agent) AGENT="${2:?}"; shift 2 ;;
+    --model) MODEL="${2:?}"; shift 2 ;;
+    --effort) EFFORT="${2:?}"; shift 2 ;;
+    --risk) RISK="${2:?}"; shift 2 ;;
+    --outcome) OUTCOME="${2:?}"; shift 2 ;;
+    --validation) VALIDATION="${2:?}"; shift 2 ;;
+    --routing) ROUTING="${2:?}"; ROUTING_SET=true; shift 2 ;;
+    --cause) CAUSE="${2:?}"; shift 2 ;;
+    --run-id) RUN_ID="${2:?}"; shift 2 ;;
+    --note) NOTE="${2:?}"; shift 2 ;;
+    --approval-basis) APPROVAL_BASIS="${2:?}"; shift 2 ;;
+    --correction) CORRECTION="${2:?}"; shift 2 ;;
+    --target-delegation-id) TARGET_DELEGATION_ID="${2:?}"; shift 2 ;;
+    --replacement-delegation-id) REPLACEMENT_DELEGATION_ID="${2:?}"; shift 2 ;;
+    --reason) CORRECTION_REASON="${2:?}"; shift 2 ;;
+    --required-model) REQUIRED_MODEL="${2:?}"; REQUIRED_MODEL_SET=true; shift 2 ;;
+    --actual-model) ACTUAL_MODEL="${2:?}"; ACTUAL_MODEL_SET=true; shift 2 ;;
+    --review-status) REVIEW_STATUS="${2:?}"; REVIEW_STATUS_SET=true; shift 2 ;;
+    --commander-model) COMMANDER_MODEL="${2:?}"; shift 2 ;;
+    --resumes) RESUMES="${2:?}"; shift 2 ;;
+    --scope-violation) SCOPE_VIOLATION="${2:?}"; shift 2 ;;
+    --review-findings) REVIEW_FINDINGS="${2:?}"; shift 2 ;;
+    *) die "不明な引数: $1" ;;
+  esac
+done
+
+[ "$MODE_COUNT" -le 1 ] || die "ID生成・audit modeは同時に1つだけ指定できる"
+case "$MODE" in
+  new-task-id) new_id task; exit 0 ;;
+  new-delegation-id) new_id del; exit 0 ;;
+  audit-delegations) audit_delegations; exit $? ;;
+  audit-run-ids) audit_run_ids; exit $? ;;
+  audit-routing) audit_routing; exit $? ;;
+  audit-all)
+    audit_rc=0
+    audit_delegations || audit_rc=$?
+    [ "$audit_rc" -ne 2 ] || exit 2
+    run_rc=0
+    audit_run_ids || run_rc=$?
+    [ "$run_rc" -ne 2 ] || exit 2
+    routing_rc=0
+    audit_routing || routing_rc=$?
+    [ "$routing_rc" -ne 2 ] || exit 2
+    [ "$audit_rc" -eq 0 ] && [ "$run_rc" -eq 0 ] && [ "$routing_rc" -eq 0 ] && exit 0
+    exit 1
+    ;;
+esac
+
+if [ -n "$EVENT" ]; then
+  if [ "$RECORD_TYPE_SET" = true ] && [ "$RECORD_TYPE" != delegation_event ]; then
+    die "--event は --record-type delegation_event とだけ併用できる"
+  fi
+  RECORD_TYPE="delegation_event"
+fi
+if [ -n "$CORRECTION" ]; then
+  if [ "$RECORD_TYPE_SET" = true ] && [ "$RECORD_TYPE" != delegation_correction ]; then
+    die "--correction は --record-type delegation_correction とだけ併用できる"
+  fi
+  RECORD_TYPE="delegation_correction"
+fi
+case "$RECORD_TYPE" in task_summary|delegation_event|delegation_correction) ;; *) die "--record-type は task_summary|delegation_event|delegation_correction" ;; esac
+
+[ -n "$REPO" ] || die "--repo は必須"
+[ -n "$TASK" ] || die "--task は必須"
+case "$EFFORT" in unknown|low|medium|high|xhigh|max) ;; *) die "--effort は unknown|low|medium|high|xhigh|max" ;; esac
+case "$APPROVAL_BASIS" in none|explicit|standing) ;; *) die "--approval-basis は none|explicit|standing" ;; esac
+case "$SCOPE_VIOLATION" in true|false) ;; *) die "--scope-violation は true|false" ;; esac
+case "$RESUMES" in ''|*[!0-9]*) die "--resumes は0以上の整数" ;; esac
+if [ -n "$REVIEW_FINDINGS" ]; then
+  case "$REVIEW_FINDINGS" in *[!0-9]*) die "--review-findings は0以上の整数" ;; esac
+fi
+case "$NOTE" in
+  *$'\n'*|*$'\r'*|*$'\t'*) die "--note に制御文字(CR/LF/TAB)は使えない。日本語、空白、semicolon は使用できる" ;;
+esac
+if [ "$APPROVAL_BASIS" != standing ]; then
+  case "$NOTE" in
+    *"standing approval 使用"*) die "'standing approval 使用' は --approval-basis standing のときだけ記録できる" ;;
+  esac
+fi
+case "$AGENT:$APPROVAL_BASIS" in
+  claude:none|grok:none|agy:none)
+    die "外部 AI (claude|grok|agy) は --kind に関係なく --approval-basis explicit|standing が必須"
+    ;;
+esac
+if [ "$APPROVAL_BASIS" = standing ]; then
+  [ "$KIND" = レビュー ] || die "--approval-basis standing は --kind レビュー が必須"
+  [ "$AGENT" = claude ] || die "--approval-basis standing は --agent claude が必須"
+  [ "$MODEL" = fable ] || die "--approval-basis standing は --model fable が必須"
+  [ "$EFFORT" = high ] || die "--approval-basis standing は --effort high が必須"
+  [ "$RISK" = 高 ] || die "--approval-basis standing は --risk 高 が必須"
+  case "$RUN_ID" in *[![:space:]]*) ;; *) die "--approval-basis standing は空でない --run-id が必須" ;; esac
+  case "$NOTE" in *"tier=最重要"*) ;; *) die "--approval-basis standing の --note には 'tier=最重要' が必須" ;; esac
+  case "$NOTE" in *"standing approval 使用"*) ;; *) die "--approval-basis standing の --note には 'standing approval 使用' が必須" ;; esac
+  case "$NOTE" in *"送信対象カテゴリ="*) ;; *) die "--approval-basis standing の --note には '送信対象カテゴリ=' が必須" ;; esac
+  SENT_CATEGORIES="${NOTE#*送信対象カテゴリ=}"
+  case "$SENT_CATEGORIES" in *"送信対象カテゴリ="*) die "--approval-basis standing の '送信対象カテゴリ=' は1回だけ記録する" ;; esac
+  SENT_CATEGORIES="${SENT_CATEGORIES%%;*}"
+  case "$SENT_CATEGORIES" in *[![:space:]]*) ;; *) die "--approval-basis standing の送信対象カテゴリは空にできない" ;; esac
+  IFS=',' read -r -a SENT_CATEGORY_LIST <<< "$SENT_CATEGORIES"
+  SEEN_CATEGORIES=","
+  for SENT_CATEGORY in "${SENT_CATEGORY_LIST[@]}"; do
+    case "$SENT_CATEGORY" in *[![:space:]]*) ;; *) die "--approval-basis standing の送信対象カテゴリに空要素は使えない" ;; esac
+    case "$SENT_CATEGORY" in
+      対象ソースコード|対象diff|マスク済みテスト結果|最小タスク要約) ;;
+      *) die "--approval-basis standing の送信対象カテゴリが規約外: $SENT_CATEGORY" ;;
+    esac
+    case "$SEEN_CATEGORIES" in *",$SENT_CATEGORY,"*) die "--approval-basis standing の送信対象カテゴリは重複できない: $SENT_CATEGORY" ;; esac
+    SEEN_CATEGORIES="${SEEN_CATEGORIES}${SENT_CATEGORY},"
+  done
+  case "$SENT_CATEGORIES" in ,*|*,|*,,*) die "--approval-basis standing の送信対象カテゴリに空要素は使えない" ;; esac
+fi
+validate_log_location
+
+if [ "$RECORD_TYPE" = task_summary ]; then
+  case "$KIND" in 実装|相談|レビュー|調査) ;; *) die "--kind は 実装|相談|レビュー|調査" ;; esac
+  case "$AGENT" in codex-native|claude|grok|agy|self) ;; *) die "--agent は codex-native|claude|grok|agy|self" ;; esac
+  [ -n "$MODEL" ] || die "--model は必須。取得不能なら unknown"
+  case "$RISK" in 低|標準|高) ;; *) die "--risk は 低|標準|高" ;; esac
+  case "$OUTCOME" in 採用|一部採用|破棄|未完了|失敗) ;; *) die "--outcome は 採用|一部採用|破棄|未完了|失敗" ;; esac
+  case "$VALIDATION" in pass|no_new_failures|fail|not_run) ;; *) die "--validation は pass|no_new_failures|fail|not_run" ;; esac
+  case "$ROUTING" in 適正|過剰|過小|委任先ミス) ;; *) die "--routing は 適正|過剰|過小|委任先ミス" ;; esac
+  case "$CAUSE" in none|model|instruction|spec_change|environment|tooling|product_decision|unknown) ;; *) die "--cause が規約外" ;; esac
+  case "$REQUIRED_MODEL" in ''|none|sonnet|opus|fable) ;; *) die "--required-model は none|sonnet|opus|fable" ;; esac
+  case "$ACTUAL_MODEL" in ''|none|sonnet|opus|fable) ;; *) die "--actual-model は none|sonnet|opus|fable" ;; esac
+  case "$REVIEW_STATUS" in ''|completed|blocked_approval|skipped_low_risk|not_required) ;; *) die "--review-status は completed|blocked_approval|skipped_low_risk|not_required" ;; esac
+  DERIVED_REQUIRED_MODEL="none"
+  if { [ "$KIND" = 実装 ] || [ "$KIND" = レビュー ]; } && [ "$AGENT" != grok ] && [ "$AGENT" != agy ]; then
+    case "$RISK" in
+      標準) DERIVED_REQUIRED_MODEL="sonnet" ;;
+      高) DERIVED_REQUIRED_MODEL="opus" ;;
+    esac
+  fi
+  case "$NOTE" in *"tier=最重要"*) DERIVED_REQUIRED_MODEL="fable" ;; esac
+  if [ "$APPROVAL_BASIS" = standing ] && [ "$MODEL" = fable ]; then
+    DERIVED_REQUIRED_MODEL="fable"
+  fi
+  if [ "$REQUIRED_MODEL_SET" = true ]; then
+    [ "$REQUIRED_MODEL" = "$DERIVED_REQUIRED_MODEL" ] || die "--required-model が派生routingと矛盾する: expected $DERIVED_REQUIRED_MODEL"
+  else
+    REQUIRED_MODEL="$DERIVED_REQUIRED_MODEL"
+  fi
+  DERIVED_ACTUAL_MODEL="none"
+  if [ "$AGENT" = claude ]; then
+    case "$MODEL" in sonnet|opus|fable) DERIVED_ACTUAL_MODEL="$MODEL" ;; esac
+  fi
+  if [ "$ACTUAL_MODEL_SET" = true ]; then
+    [ "$ACTUAL_MODEL" = "$DERIVED_ACTUAL_MODEL" ] || die "--actual-model が --agent/--model と矛盾する: expected $DERIVED_ACTUAL_MODEL"
+  else
+    ACTUAL_MODEL="$DERIVED_ACTUAL_MODEL"
+  fi
+  if [ "$ACTUAL_MODEL" != none ]; then
+    [ "$AGENT" = claude ] || die "--actual-model が外部reviewを示す場合は --agent claude が必須"
+    [ "$MODEL" = "$ACTUAL_MODEL" ] || die "--actual-model は --model と一致させる"
+  fi
+  DERIVED_REVIEW_STATUS="$(valid_review_status_for "$REQUIRED_MODEL" "$ACTUAL_MODEL")"
+  if [ "$REVIEW_STATUS_SET" = true ]; then
+    [ "$REVIEW_STATUS" = "$DERIVED_REVIEW_STATUS" ] || die "--review-status が派生routingと矛盾する: expected $DERIVED_REVIEW_STATUS"
+  else
+    REVIEW_STATUS="$DERIVED_REVIEW_STATUS"
+  fi
+  DERIVED_ROUTING="$(valid_routing_for "$REQUIRED_MODEL" "$ACTUAL_MODEL")"
+  [ "$ROUTING" = "$DERIVED_ROUTING" ] || die "--routing が review model routing と矛盾する: expected $DERIVED_ROUTING"
+  if [ "$REQUIRED_MODEL" = fable ] && [ "$ACTUAL_MODEL" != fable ]; then
+    case "$OUTCOME" in 未完了|失敗) ;; *) die "最重要 fable review 欠落または下位review時の --outcome は 未完了|失敗 が必須" ;; esac
+  fi
+elif [ "$RECORD_TYPE" = delegation_event ]; then
+  [ -n "$EVENT" ] || die "delegation_event は --event が必須"
+  case "$EVENT" in dispatched|followup|completed|failed) ;; *) die "--event は dispatched|followup|completed|failed" ;; esac
+  [ -n "$TASK_ID" ] || die "delegation_event は --task-id が必須"
+  [ -n "$DELEGATION_ID" ] || die "delegation_event は --delegation-id が必須"
+  [ -n "$SUBAGENT_ROLE" ] || die "delegation_event は --subagent-role が必須"
+  case "$SUBAGENT_ROLE" in *[!A-Za-z0-9_-]*|'') die "--subagent-role は [A-Za-z0-9_-]+ にする" ;; esac
+  [ -n "$AGENT_TASK_NAME" ] || die "delegation_event は --agent-task-name が必須"
+  case "$ATTEMPT" in ''|*[!0-9]*) die "delegation_event は --attempt 1以上の整数が必須" ;; esac
+  [ "$ATTEMPT" -ge 1 ] || die "delegation_event は --attempt 1以上の整数が必須"
+  case "$AGENT" in codex-native|claude|grok|agy) ;; self) die "delegation_event に --agent self は使えない" ;; *) die "delegation_event の --agent は codex-native|claude|grok|agy" ;; esac
+  if [ -z "$MODEL" ]; then
+    [ "$AGENT" = codex-native ] || die "外部 AI delegation_event は --model が必須"
+    MODEL="unknown"
+  fi
+  if [ -n "$KIND" ]; then case "$KIND" in 実装|相談|レビュー|調査) ;; *) die "--kind は 実装|相談|レビュー|調査" ;; esac; fi
+  if [ -n "$RISK" ]; then case "$RISK" in 低|標準|高) ;; *) die "--risk は 低|標準|高" ;; esac; fi
+  [ -n "$ROUTING" ] || ROUTING="適正"
+  case "$ROUTING" in 適正|過剰|過小|委任先ミス) ;; *) die "--routing は 適正|過剰|過小|委任先ミス" ;; esac
+  [ -n "$CAUSE" ] || CAUSE="none"
+  case "$CAUSE" in none|model|instruction|spec_change|environment|tooling|product_decision|unknown) ;; *) die "--cause が規約外" ;; esac
+  case "$EVENT" in
+    dispatched)
+      [ "$ATTEMPT" -eq 1 ] || die "dispatched は --attempt 1 が必須"
+      [ -n "$OWNERSHIP" ] || die "dispatched は --ownership が必須"
+      [ -n "$OUTCOME" ] || OUTCOME="未完了"
+      [ -n "$VALIDATION" ] || VALIDATION="not_run"
+      [ "$OUTCOME" = 未完了 ] || die "dispatched の --outcome は 未完了"
+      [ "$VALIDATION" = not_run ] || die "dispatched の --validation は not_run"
+      ;;
+    followup)
+      [ "$ATTEMPT" -ge 2 ] || die "followup は --attempt 2以上が必須"
+      [ -n "$OUTCOME" ] || OUTCOME="未完了"
+      [ -n "$VALIDATION" ] || VALIDATION="not_run"
+      [ "$OUTCOME" = 未完了 ] || die "followup の --outcome は 未完了"
+      [ "$VALIDATION" = not_run ] || die "followup の --validation は not_run"
+      ;;
+    completed)
+      case "$OUTCOME" in 採用|一部採用|破棄) ;; *) die "completed は --outcome 採用|一部採用|破棄 が必須" ;; esac
+      case "$VALIDATION" in pass|no_new_failures) ;; *) die "completed は --validation pass|no_new_failures が必須" ;; esac
+      ;;
+    failed)
+      case "$OUTCOME" in 失敗|未完了) ;; *) die "failed は --outcome 失敗|未完了 が必須" ;; esac
+      case "$VALIDATION" in fail|not_run) ;; *) die "failed は --validation fail|not_run が必須" ;; esac
+      [ "$CAUSE" != none ] || die "failed は --cause none を使えない"
+      ;;
+  esac
+else
+  [ -n "$CORRECTION" ] || die "delegation_correction は --correction が必須"
+  case "$CORRECTION" in voided|supersedes) ;; *) die "--correction は voided|supersedes" ;; esac
+  [ -n "$TARGET_DELEGATION_ID" ] || die "delegation_correction は --target-delegation-id が必須"
+  [ -n "$CORRECTION_REASON" ] || die "delegation_correction は --reason が必須"
+  case "$CORRECTION_REASON" in historical_bad_lifecycle|operator_error|duplicate_record|unknown) ;; *) die "--reason は historical_bad_lifecycle|operator_error|duplicate_record|unknown" ;; esac
+  if [ "$CORRECTION" = supersedes ]; then
+    [ -n "$REPLACEMENT_DELEGATION_ID" ] || die "supersedes は --replacement-delegation-id が必須"
+    [ "$TARGET_DELEGATION_ID" != "$REPLACEMENT_DELEGATION_ID" ] || die "correction target と replacement は同一にできない"
+  else
+    [ -z "$REPLACEMENT_DELEGATION_ID" ] || die "voided は --replacement-delegation-id を使えない"
+  fi
+fi
+
+CLAUDE_RUN_REQUIRED=false
+if [ "$AGENT" = claude ] && { [ "$APPROVAL_BASIS" = explicit ] || [ "$APPROVAL_BASIS" = standing ]; }; then
+  if [ "$RECORD_TYPE" = delegation_event ] && [ "$EVENT" = completed ]; then
+    CLAUDE_RUN_REQUIRED=true
+  elif [ "$RECORD_TYPE" = task_summary ]; then
+    case "$OUTCOME:$VALIDATION" in
+      採用:*|一部採用:*|破棄:*|*:pass|*:no_new_failures) CLAUDE_RUN_REQUIRED=true ;;
+    esac
+  fi
+fi
+if [ "$CLAUDE_RUN_REQUIRED" = true ]; then
+  case "$RUN_ID" in *[![:space:]]*) ;; *) die "成功・採否を記録する Claude review は空でない --run-id が必須" ;; esac
+fi
+
+validate_log_location
+ensure_log_dir
+reject_log_symlink "$LOG_FILE" "委任評価ログ"
+TIMESTAMP="$(iso_now)"
+LOCAL_DATE="$(date +%F)"
+if [ "$RECORD_TYPE" = task_summary ]; then
+  RECORD="$(jq -cn \
+    --arg date "$LOCAL_DATE" --arg timestamp "$TIMESTAMP" --arg repo "$REPO" --arg task "$TASK" --arg task_id "$TASK_ID" --arg kind "$KIND" \
+    --arg orchestrator "codex" --arg commander_model "$COMMANDER_MODEL" --arg agent "$AGENT" \
+    --arg model "$MODEL" --arg effort "$EFFORT" --arg risk "$RISK" --arg outcome "$OUTCOME" --arg validation "$VALIDATION" \
+    --arg routing "$ROUTING" --arg cause "$CAUSE" --arg run_id "$RUN_ID" --arg note "$NOTE" \
+    --arg approval_basis "$APPROVAL_BASIS" --arg required_model "$REQUIRED_MODEL" --arg actual_model "$ACTUAL_MODEL" \
+    --arg review_status "$REVIEW_STATUS" \
+    --arg review_findings "$REVIEW_FINDINGS" --argjson resumes "$RESUMES" \
+    --argjson scope_violation "$SCOPE_VIOLATION" \
+    '{schema_version:2,record_type:"task_summary",date:$date,timestamp:$timestamp,
+      repo:$repo,task:$task,task_id:(if $task_id=="" then null else $task_id end),
+      delegation_id:null,parent_delegation_id:null,event:null,subagent_role:null,agent_task_name:null,ownership:null,attempt:null,
+      kind:$kind,orchestrator:$orchestrator,commander_model:$commander_model,agent:$agent,model:$model,effort:$effort,
+      risk:$risk,outcome:$outcome,validation:$validation,routing_verdict:$routing,cause:$cause,
+      run_id:(if $run_id=="" then null else $run_id end),resumes:$resumes,scope_violation:$scope_violation,
+      review_findings:($review_findings|tonumber? // null),approval_basis:$approval_basis,
+      required_model:$required_model,actual_model:$actual_model,review_status:$review_status,note:$note}')" \
+    || die "task_summary JSON の生成に失敗"
+elif [ "$RECORD_TYPE" = delegation_event ]; then
+  RECORD="$(jq -cn \
+    --arg date "$LOCAL_DATE" --arg timestamp "$TIMESTAMP" --arg repo "$REPO" --arg task "$TASK" --arg task_id "$TASK_ID" \
+    --arg delegation_id "$DELEGATION_ID" --arg parent_delegation_id "$PARENT_DELEGATION_ID" \
+    --arg event "$EVENT" --arg subagent_role "$SUBAGENT_ROLE" --arg agent_task_name "$AGENT_TASK_NAME" \
+    --arg ownership "$OWNERSHIP" --arg kind "$KIND" --arg orchestrator "codex" \
+    --arg commander_model "$COMMANDER_MODEL" --arg agent "$AGENT" --arg model "$MODEL" --arg effort "$EFFORT" \
+    --arg risk "$RISK" --arg outcome "$OUTCOME" --arg validation "$VALIDATION" --arg routing "$ROUTING" \
+    --arg cause "$CAUSE" --arg run_id "$RUN_ID" --arg note "$NOTE" --arg approval_basis "$APPROVAL_BASIS" \
+    --arg review_findings "$REVIEW_FINDINGS" --argjson attempt "$ATTEMPT" --argjson resumes "$RESUMES" \
+    --argjson scope_violation "$SCOPE_VIOLATION" \
+    '{schema_version:2,record_type:"delegation_event",date:$date,timestamp:$timestamp,
+      repo:$repo,task:$task,task_id:$task_id,delegation_id:$delegation_id,
+      parent_delegation_id:(if $parent_delegation_id=="" then null else $parent_delegation_id end),
+      event:$event,subagent_role:$subagent_role,agent_task_name:$agent_task_name,
+      ownership:(if $ownership=="" then null else $ownership end),attempt:$attempt,
+      kind:(if $kind=="" then null else $kind end),orchestrator:$orchestrator,commander_model:$commander_model,
+      agent:$agent,model:$model,effort:$effort,risk:(if $risk=="" then null else $risk end),
+      outcome:$outcome,validation:$validation,routing_verdict:$routing,cause:$cause,
+      run_id:(if $run_id=="" then null else $run_id end),resumes:$resumes,scope_violation:$scope_violation,
+      review_findings:($review_findings|tonumber? // null),approval_basis:$approval_basis,note:$note}')" \
+    || die "delegation_event JSON の生成に失敗"
+else
+  RECORD="$(jq -cn \
+    --arg date "$LOCAL_DATE" --arg timestamp "$TIMESTAMP" --arg repo "$REPO" --arg task "$TASK" --arg task_id "$TASK_ID" \
+    --arg target_delegation_id "$TARGET_DELEGATION_ID" --arg replacement_delegation_id "$REPLACEMENT_DELEGATION_ID" \
+    --arg correction "$CORRECTION" --arg reason "$CORRECTION_REASON" --arg orchestrator "codex" --arg commander_model "$COMMANDER_MODEL" \
+    --arg note "$NOTE" \
+    '{schema_version:2,record_type:"delegation_correction",date:$date,timestamp:$timestamp,
+      repo:$repo,task:$task,task_id:(if $task_id=="" then null else $task_id end),
+      delegation_id:null,parent_delegation_id:null,event:null,subagent_role:null,agent_task_name:null,ownership:null,attempt:null,
+      target_delegation_id:$target_delegation_id,
+      replacement_delegation_id:(if $replacement_delegation_id=="" then null else $replacement_delegation_id end),
+      correction:$correction,reason:$reason,kind:null,orchestrator:$orchestrator,commander_model:$commander_model,
+      agent:"self",model:"none",effort:"unknown",risk:null,outcome:"採用",validation:"not_run",
+      routing_verdict:"適正",cause:"none",run_id:null,resumes:0,scope_violation:false,
+      review_findings:null,approval_basis:"none",note:$note}')" \
+    || die "delegation_correction JSON の生成に失敗"
+fi
+reject_log_symlink "$LOG_FILE" "委任評価ログ"
+with_log_lock
+reject_log_symlink "$LOG_FILE" "委任評価ログ"
+if ! validate_preappend_state "$RECORD"; then
+  release_log_lock
+  trap - EXIT
+  die "record-time lifecycle validation が追記を拒否した"
+fi
+if ! printf '%s\n' "$RECORD" >> "$LOG_FILE"; then
+  release_log_lock
+  trap - EXIT
+  die "ログ追記に失敗: ${LOG_FILE}。同一コマンドを sandbox escalation で再実行する。ログ先変更はユーザー明示設定のみ"
+fi
+release_log_lock
+trap - EXIT
+
+echo "recorded: $LOG_FILE ($(wc -l < "$LOG_FILE" | tr -d ' ') lines)"

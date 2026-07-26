@@ -3,6 +3,34 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] - 2026-07-22
+
+### Added
+
+- **Codex 専用 `delegate-codex` スキル**を追加。メイン Codex を司令塔に固定し、repo 内調査・実装は Codex native subagent、標準は Claude Sonnet / high、高は Claude Opus / high、最重要は Claude Fable / high を主レビューにする
+- Claude を `--safe-mode` / `--permission-mode plan` / 限定 tools で実行し、必須 CLI flag の事前検査、stdin packet、stdout/stderr 分離、実行前後の git status、session・token・cost・cooldown をOS標準のworktree外ログ先へ記録する `delegate-review` runner を追加
+- 既定ログ先を、git管理され得る `~/.codex/logs/delegate-codex` ではなく macOS `~/Library/Logs/delegate-codex`、Linux `${XDG_STATE_HOME:-~/.local/state}/delegate-codex` に設定。packet・result・ログはすべてのgit worktree内配置をfail-closedで拒否する
+- 採否・検証・routing 評価を JSONL に記録する `delegate-log`、fake Claude CLI による runner テスト、Codex plugin / marketplace metadata を追加
+- `delegate-log`に後方互換なschema v2 `task_summary`、`delegation_event`、task/delegation ID生成を追加。メインCodexがspawn/follow-up/terminalの状態遷移を記録し、`--audit-delegations` / `--audit-run-ids` / `--audit-all`で未閉鎖委任・不正遷移・summary欠落・Claude run ID/model/effort不一致を読み取り専用監査する。legacy行の欠落・`unknown` model/effortは不一致と断定せず、具体値とstanding `fable / high`は厳格照合する
+- task summaryが対象taskの全eventより後にあることと、成功・採否を記録するexplicit/standing Claude reviewのrun IDを記録時・監査時の両方で必須化。skill-local `.env`のshell sourceを廃止し、`DELEGATE_CODEX_LOG_DIR` / `CLAUDE_BIN`だけの静的パースとsymlink・未知キー・制御文字・shell構文の拒否へ変更
+- `delegate-log` に append-only `delegation_correction` と `--audit-routing` を追加。`voided|supersedes` correction は物理行を残したまま過去の不正 lifecycle だけを lifecycle audit/preappend の effective state で補正し、正常な未閉鎖 delegation を隠す correction は拒否する。task summary は `required_model` / `actual_model` / `review_status` を記録する
+
+### Changed
+
+- `delegate-codex` の暗黙起動を許可し、スキル起動と外部 AI 送信承認を分離。Fable を最重要だけへ限定し、認証/認可境界・課金/金銭・顧客/本番データ・秘密/署名/供給網・本番移行のうち、破壊的・不可逆・広範囲・rollback 困難・複数システム波及を伴う変更だけを `fable / high` にroutingする。局所的で可逆なら高として `opus / high`、通常の標準は `sonnet / high` とする
+- ユーザーが指定・開いたユーザー管理 repo の必要最小限の対象コード・diff・マスク済みテスト結果・非秘密タスク要約だけを使う Anthropic Claude Fable `fable / high` read-only 最重要レビューには限定的な恒常承認を適用し、実行前の条件確認と最終報告・`delegate-log` への `tier=最重要`・`standing approval 使用`・送信カテゴリ記録を必須化した
+- `.env`、秘密鍵、認証/アクセストークン、DB接続文字列、顧客/個人データ、本番ログ、認証済みブラウザ状態、委任の生ログを恒常承認から常時除外し、テスト出力の秘密検査・マスクを必須化した。条件外・範囲不明・より広いデータ・Fable以外（Sonnet / Opus含む）・外部AIによる実装/書き込み/追加network actionは従来どおりタスク単位の明示承認を要求する。Opus/high は `explicit` とし、Fable 不可時の Opus/Sonnet fallback と Opus 不可時の Sonnet fallback を黙って行わない
+- `delegate-log` に `--approval-basis none|explicit|standing` と `--effort unknown|low|medium|high|xhigh|max` を追加し、JSONL に `approval_basis` / `effort` を記録。省略時の `none` / `unknown` 後方互換は self/native/no-transfer だけに維持し、Claude / Grok / Antigravity (`agent=claude|grok|agy`) は `kind` に関係なく外部送信の`none`を拒否する。`standing` は `kind=レビュー`・`agent=claude`・`model=fable`・`effort=high`・`risk=高`・空でない `run-id`・`tier=最重要`・必須 note marker を fail-closed で検証する。送信カテゴリは許可語彙だけを順序自由・重複不可で受け入れ、空・未知・重複と non-standing entry の standing marker を拒否する。全noteのCR / LF / TABも拒否し、通常の日本語、空白、semicolonは維持する。`fable / max` と Sonnet / Opus は実effort付き `explicit` とする
+- `delegate-log` の lifecycle は追記と同じ atomic lock 内で検証する。重複dispatch、dispatchなしfollow-up、terminal後event、dispatchなしterminal、重複terminal、未閉鎖effective delegation中のsummaryは追記前に拒否し、行数を変えない。既存lockは自動削除せず、bounded wait 後にfail-closedする。`--audit-all` は delegation/run-id/routing の3監査を読み取り専用で実行する
+- 標準は required Sonnet、高は required Opus、最重要は required Fable として routing を派生し、欠落reviewは `blocked_approval` と `routing=過小` にする。required より上位の実reviewは `過剰`、最重要Fableの欠落またはSonnet/Opus下位reviewは `outcome=未完了|失敗` のみ許可する。高Opus欠落は `過小` / `blocked_approval` なら採用記録を許容する。Opus standing approval は現在未対応で、ユーザーが限定条件を明示承認し規約へ追加するまでは Opus をタスク単位の `explicit` とする
+- 低リスク・調査・相談・直接処理・native subagent のみ・Claude review なしを含む全利用で、最終応答前の `delegate-log` 成功と `recorded:` パスの報告を完了条件にした
+- `delegate-review` が `runs.jsonl` 追記失敗を明示エラー・exit 2 として検知するようにした
+- managed sandbox が既定の永続ログ先を拒否した場合は、同一 `delegate-log` コマンドを実行環境側で escalation し、承認拒否時は未完了とする規約を追加。repo / worktree / 一時パスへの暗黙 fallback を禁止し、ユーザー明示の永続・絶対・書込可能・worktree 外 `DELEGATE_CODEX_LOG_DIR` だけを許可する
+- `delegate-log` の追記失敗をログファイル絶対パス付きの明示エラー・exit 2 として検証するテストを追加
+- `delegate-review` / `delegate-log` のログディレクトリ作成失敗で OS エラー原文を保持し、同一コマンドの sandbox escalation とユーザー明示時だけのログ先変更を案内するよう修正
+- Claude CLI review を既定ログ先での直列実行へ統一し、reviewer 別ログ分割・事後統合を廃止。`runs.jsonl` / `cooldowns.json` の競合と cooldown race を回避する
+- `delegation-log.jsonl` / `runs.jsonl` / `cooldowns.json` の symlink を拒否し、cooldown サブコマンドも読取・作成前に絶対パスと全 git worktree 外を検証する
+
 ## [0.19.0] - 2026-07-21
 
 ### Added

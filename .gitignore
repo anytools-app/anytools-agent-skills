@@ -1,5 +1,6 @@
 # Local instance configuration (log paths etc.) — copy from .env.example
 skills/delegate/.env
+codex-skills/delegate-codex/.env
 
 # Session-local Claude Code settings
 .claude/settings.local.json
@@ -10,6 +11,9 @@ skills/delegate/.env
 
 # Skill-local backups
 skills/*/.backup/
+
+# serena MCP のプロジェクトインデックス(委任先が無断生成する。lessons.md 参照)
+.serena/
 
 # macOS
 .DS_Store

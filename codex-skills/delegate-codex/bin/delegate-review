@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# Claude Code CLI を Codex の read-only 主レビュー役として実行する。
+#
+# Usage:
+#   delegate-review --model sonnet --effort high --cd /abs/repo --prompt-file review.md
+#   delegate-review --model sonnet --effort high --cd /abs/repo --prompt-file followup.md --resume <session-id>
+#   delegate-review --cooldowns
+#   delegate-review --clear-cooldown
+#
+# Exit codes:
+#   0: review success
+#   2: configuration, authentication, cooldown gate, or run-log write failure
+#   3: worktree changed during the review
+#   4: Claude returned an invalid result JSON
+#   other non-zero: Claude CLI exit code is preserved
+#
+# Logs:
+#   DELEGATE_CODEX_LOG_DIR > skill .env > OS state/log directory
+
+set -u
+umask 077
+
+die() { echo "delegate-review: ERROR: $*" >&2; exit 2; }
+warn() { echo "delegate-review: WARN: $*" >&2; }
+
+load_local_env() {
+  local path="$1" line key value line_no=0 quote
+  [ ! -L "$path" ] || die "skill .env に symlink は使えない: $path"
+  [ -f "$path" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    case "$line" in
+      ''|\#*) continue ;;
+      *$'\r'*|*$'\t'*) die "skill .env の${line_no}行目に CR/TAB は使えない" ;;
+    esac
+    if [[ "$line" =~ ^(export[[:space:]]+)?(DELEGATE_CODEX_LOG_DIR|CLAUDE_BIN)=(.*)$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      value="${BASH_REMATCH[3]}"
+    else
+      die "skill .env の${line_no}行目は DELEGATE_CODEX_LOG_DIR|CLAUDE_BIN の KEY=value だけを使用できる"
+    fi
+    if [[ "$value" == \"* || "$value" == \'* ]]; then
+      quote="${value:0:1}"
+      [ "${#value}" -ge 2 ] && [ "${value: -1}" = "$quote" ] \
+        || die "skill .env の${line_no}行目に閉じていないquoteがある"
+      value="${value:1:${#value}-2}"
+    fi
+    case "$value" in
+      *'$('*|*'${'*|*'`'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*\\*)
+        die "skill .env の${line_no}行目にshell構文は使えない"
+        ;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done < "$path"
+}
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_LOG_DIR="${DELEGATE_CODEX_LOG_DIR:-}"
+ENV_CLAUDE_BIN="${CLAUDE_BIN:-}"
+load_local_env "$SKILL_DIR/.env"
+if [ -n "${XDG_STATE_HOME:-}" ]; then
+  DEFAULT_LOG_DIR="$XDG_STATE_HOME/delegate-codex"
+elif [ "$(uname -s)" = Darwin ]; then
+  DEFAULT_LOG_DIR="$HOME/Library/Logs/delegate-codex"
+else
+  DEFAULT_LOG_DIR="$HOME/.local/state/delegate-codex"
+fi
+LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_CODEX_LOG_DIR:-$DEFAULT_LOG_DIR}}"
+CLAUDE_BIN="${ENV_CLAUDE_BIN:-${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}}"
+RUNS_JSONL="$LOG_DIR/runs.jsonl"
+COOLDOWN_FILE="$LOG_DIR/cooldowns.json"
+
+iso_now() { date -u +%FT%TZ; }
+
+ensure_log_dir() {
+  local mkdir_error
+  mkdir_error="$(mkdir -p "$LOG_DIR/runs" 2>&1)" \
+    || die "ログ先へ書き込めない: $LOG_DIR: ${mkdir_error}。同一コマンドを sandbox escalation で再実行する。ログ先変更はユーザー明示設定のみ"
+}
+
+validate_log_dir() {
+  local check_dir check_parent
+  case "$LOG_DIR" in /*) ;; *) die "DELEGATE_CODEX_LOG_DIR は絶対パスにする: $LOG_DIR" ;; esac
+  check_dir="$LOG_DIR"
+  [ -d "$check_dir" ] || check_dir="$(dirname "$check_dir")"
+  while [ ! -d "$check_dir" ]; do
+    check_parent="$(dirname "$check_dir")"
+    [ "$check_parent" != "$check_dir" ] || die "ログ先の親ディレクトリを解決できない: $LOG_DIR"
+    check_dir="$check_parent"
+  done
+  if git -C "$check_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "ログ先は対象 repo 外、かつすべての git worktree 外へ置く: $LOG_DIR"
+  fi
+}
+
+reject_log_symlink() {
+  local path="$1" label="$2"
+  [ ! -L "$path" ] || die "$label に symlink は使えない: $path"
+}
+
+cooldown_until() {
+  [ -s "$COOLDOWN_FILE" ] || return 0
+  jq -e . "$COOLDOWN_FILE" >/dev/null 2>&1 || return 2
+  jq -r --arg now "$(iso_now)" '.claude // empty | select(.until > $now) | .until' "$COOLDOWN_FILE" 2>/dev/null
+}
+
+set_cooldown() {
+  local reason="$1" until tmp
+  ensure_log_dir
+  reject_log_symlink "$COOLDOWN_FILE" "cooldown JSON"
+  until="$(date -u -v+1H +%FT%TZ 2>/dev/null || date -u -d '+1 hour' +%FT%TZ 2>/dev/null)" \
+    || die "cooldown 期限を計算できない"
+  tmp="$COOLDOWN_FILE.$$.tmp"
+  if [ -s "$COOLDOWN_FILE" ]; then
+    jq --arg until "$until" --arg reason "$reason" '.claude={until:$until,reason:$reason}' "$COOLDOWN_FILE" > "$tmp" || die "cooldown JSON の更新に失敗"
+  else
+    jq -n --arg until "$until" --arg reason "$reason" '{claude:{until:$until,reason:$reason}}' > "$tmp" || die "cooldown JSON の作成に失敗"
+  fi
+  mv "$tmp" "$COOLDOWN_FILE" || die "cooldown JSON の置換に失敗"
+}
+
+case "${1:-}" in
+  --cooldowns)
+    validate_log_dir
+    reject_log_symlink "$COOLDOWN_FILE" "cooldown JSON"
+    if [ ! -s "$COOLDOWN_FILE" ]; then
+      echo "cooldown の記録なし"
+      exit 0
+    fi
+    jq -e . "$COOLDOWN_FILE" >/dev/null 2>&1 || die "cooldown JSON が壊れている: $COOLDOWN_FILE"
+    jq -r --arg now "$(iso_now)" '.claude // empty | "claude\tuntil \(.until) UTC \(if .until > $now then "[有効]" else "[期限切れ]" end)\t\(.reason)"' "$COOLDOWN_FILE"
+    exit 0 ;;
+  --clear-cooldown)
+    validate_log_dir
+    ensure_log_dir
+    reject_log_symlink "$COOLDOWN_FILE" "cooldown JSON"
+    if [ -s "$COOLDOWN_FILE" ]; then
+      tmp="$COOLDOWN_FILE.$$.tmp"
+      jq 'del(.claude)' "$COOLDOWN_FILE" > "$tmp" || die "cooldown JSON の解析に失敗"
+      mv "$tmp" "$COOLDOWN_FILE" || die "cooldown JSON の置換に失敗"
+    fi
+    echo "cooldown: claude を解除"
+    exit 0 ;;
+  -h|--help)
+    sed -n '2,20p' "$0"
+    exit 0 ;;
+esac
+
+validate_log_dir
+
+MODEL="" EFFORT="" CD="" PROMPT_FILE="" RESUME="" LOG_FILE="" RESULT_FILE=""
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) MODEL="${2:?}"; shift 2 ;;
+    --effort) EFFORT="${2:?}"; shift 2 ;;
+    --cd) CD="${2:?}"; shift 2 ;;
+    --prompt-file) PROMPT_FILE="${2:?}"; shift 2 ;;
+    --resume) RESUME="${2:?}"; shift 2 ;;
+    --log) LOG_FILE="${2:?}"; shift 2 ;;
+    --out-result) RESULT_FILE="${2:?}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *) die "不明な引数: $1。permission / tools / safe-mode は runner が固定するため手動指定できない" ;;
+  esac
+done
+
+[ -n "$MODEL" ] || die "--model は必須"
+case "$EFFORT" in low|medium|high|xhigh|max) ;; *) die "--effort は low|medium|high|xhigh|max" ;; esac
+[ -n "$CD" ] || die "--cd は必須"
+case "$CD" in /*) ;; *) die "--cd は絶対パスで指定する" ;; esac
+[ -d "$CD" ] || die "--cd が存在しない: $CD"
+git -C "$CD" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "--cd は git リポジトリ内を指定する"
+CD="$(cd "$CD" && pwd -P)"
+REPO_ROOT="$(git -C "$CD" rev-parse --show-toplevel 2>/dev/null)" || die "repo root を取得できない"
+REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+[ -n "$PROMPT_FILE" ] || die "--prompt-file は必須"
+[ -s "$PROMPT_FILE" ] || die "review packet が存在しないか空: $PROMPT_FILE"
+[ -n "$CLAUDE_BIN" ] || die "claude CLI が見つからない。CLAUDE_BIN または PATH を確認する"
+case "$CLAUDE_BIN" in
+  */*)
+    case "$CLAUDE_BIN" in /*) ;; *) CLAUDE_BIN="$PWD/$CLAUDE_BIN" ;; esac
+    [ -x "$CLAUDE_BIN" ] || die "claude CLI を実行できない: $CLAUDE_BIN"
+    CLAUDE_BIN="$(cd "$(dirname "$CLAUDE_BIN")" && pwd -P)/$(basename "$CLAUDE_BIN")" ;;
+  *)
+    CLAUDE_BIN="$(command -v "$CLAUDE_BIN" 2>/dev/null || true)"
+    [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ] || die "claude CLI が見つからない。CLAUDE_BIN または PATH を確認する" ;;
+esac
+command -v jq >/dev/null 2>&1 || die "jq が必要"
+command -v uuidgen >/dev/null 2>&1 || die "uuidgen が必要"
+
+CLAUDE_HELP="$("$CLAUDE_BIN" --help 2>&1 || true)"
+for REQUIRED_FLAG in --safe-mode --no-chrome --permission-mode --tools --disallowedTools --model --effort --output-format --session-id --resume; do
+  printf '%s' "$CLAUDE_HELP" | grep -Fq -- "$REQUIRED_FLAG" \
+    || die "claude CLI が必須 flag $REQUIRED_FLAG を提供していない。CLI version と adapter を確認する"
+done
+
+RUN_ID="run_$(date +%Y%m%d-%H%M%S)_$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+SESSION_ID="${RESUME:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
+[ -n "$LOG_FILE" ] || LOG_FILE="$LOG_DIR/runs/$RUN_ID.log"
+[ -n "$RESULT_FILE" ] || RESULT_FILE="$LOG_DIR/runs/$RUN_ID.result.json"
+
+path_is_under_repo() {
+  case "$1" in "$REPO_ROOT"|"$REPO_ROOT"/*) return 0 ;; *) return 1 ;; esac
+}
+existing_parent_path_is_under_repo() {
+  local candidate="$1" parent parent_real
+  parent="$(dirname "$candidate")"
+  [ -d "$parent" ] || return 1
+  parent_real="$(cd "$parent" && pwd -P)" || return 1
+  path_is_under_repo "$parent_real/$(basename "$candidate")"
+}
+nearest_existing_dir() {
+  local candidate="$1" parent
+  [ -d "$candidate" ] || candidate="$(dirname "$candidate")"
+  while [ ! -d "$candidate" ]; do
+    parent="$(dirname "$candidate")"
+    [ "$parent" != "$candidate" ] || return 1
+    candidate="$parent"
+  done
+  (cd "$candidate" && pwd -P)
+}
+path_is_in_git_worktree() {
+  local anchor
+  anchor="$(nearest_existing_dir "$1")" || return 1
+  git -C "$anchor" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+case "$PROMPT_FILE" in /*) ;; *) die "review packet は絶対パスで指定する: $PROMPT_FILE" ;; esac
+[ ! -L "$PROMPT_FILE" ] || die "review packet に symlink は使えない: $PROMPT_FILE"
+existing_parent_path_is_under_repo "$PROMPT_FILE" && die "review packet は対象 repo 外へ置く: $PROMPT_FILE"
+path_is_in_git_worktree "$PROMPT_FILE" && die "review packet はすべての git worktree 外へ置く: $PROMPT_FILE"
+for OUTPUT_PATH in "$LOG_DIR" "$LOG_FILE" "$RESULT_FILE"; do
+  case "$OUTPUT_PATH" in /*) ;; *) die "ログ・結果パスは絶対パスにする: $OUTPUT_PATH" ;; esac
+  path_is_under_repo "$OUTPUT_PATH" && die "review packet・結果・ログは対象 repo 外へ置く: $OUTPUT_PATH"
+  existing_parent_path_is_under_repo "$OUTPUT_PATH" && die "review packet・結果・ログは対象 repo 外へ置く: $OUTPUT_PATH"
+  path_is_in_git_worktree "$OUTPUT_PATH" && die "review packet・結果・ログはすべての git worktree 外へ置く: $OUTPUT_PATH"
+done
+
+ARGS=("$CLAUDE_BIN" -p --safe-mode --no-chrome --permission-mode plan
+  --tools "Read,Glob,Grep" --disallowedTools "mcp__*"
+  --model "$MODEL" --effort "$EFFORT" --output-format json)
+if [ -n "$RESUME" ]; then
+  ARGS+=(--resume "$RESUME")
+else
+  ARGS+=(--session-id "$SESSION_ID")
+fi
+
+shq() { printf '%q' "$1"; }
+CMD_DISPLAY="cd $(shq "$CD") && "
+for arg in "${ARGS[@]}"; do CMD_DISPLAY+="$(shq "$arg") "; done
+CMD_DISPLAY+="< $(shq "$PROMPT_FILE") > $(shq "$RESULT_FILE") 2> $(shq "$LOG_FILE")"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "run_id: $RUN_ID (dry-run: 実行・記録なし)"
+  echo "$CMD_DISPLAY"
+  exit 0
+fi
+
+AUTH_JSON="$("$CLAUDE_BIN" auth status 2>/dev/null || true)"
+printf '%s' "$AUTH_JSON" | jq -e '.loggedIn == true' >/dev/null 2>&1 \
+  || die "Claude CLI が未認証。ユーザー自身が 'claude auth login' を実行する"
+
+ensure_log_dir
+reject_log_symlink "$RUNS_JSONL" "runs.jsonl"
+reject_log_symlink "$COOLDOWN_FILE" "cooldown JSON"
+LOG_DIR_REAL="$(cd "$LOG_DIR" && pwd -P)" || die "ログ先を解決できない: $LOG_DIR"
+path_is_under_repo "$LOG_DIR_REAL" && die "ログ先の実体が対象 repo 内にある: $LOG_DIR_REAL"
+git -C "$LOG_DIR_REAL" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  && die "ログ先の実体はすべての git worktree 外へ置く: $LOG_DIR_REAL"
+for OUTPUT_PATH in "$LOG_FILE" "$RESULT_FILE"; do
+  OUTPUT_PARENT="$(dirname "$OUTPUT_PATH")"
+  [ -d "$OUTPUT_PARENT" ] || die "出力先ディレクトリが存在しない: $OUTPUT_PARENT"
+  [ ! -L "$OUTPUT_PATH" ] || die "ログ・結果ファイルに symlink は使えない: $OUTPUT_PATH"
+  OUTPUT_PARENT_REAL="$(cd "$OUTPUT_PARENT" && pwd -P)" || die "出力先を解決できない: $OUTPUT_PARENT"
+  path_is_under_repo "$OUTPUT_PARENT_REAL" && die "ログ・結果の実体は対象 repo 外へ置く: $OUTPUT_PATH"
+done
+CD_UNTIL="$(cooldown_until)" || die "cooldown JSON が壊れている: $COOLDOWN_FILE"
+[ -z "$CD_UNTIL" ] || die "claude は cooldown 中(until $CD_UNTIL UTC)。標準: 代替外部 AI にもタスク単位の明示承認が必要。高: Opus 不可時に Sonnet へ黙って切り替えず、明示承認なしに代替外部 AI を使わない。最重要: Fable 未実施を blocker として残す"
+
+STATUS_BEFORE="$(git -C "$CD" status --porcelain=v1 2>/dev/null || true)"
+START_TS="$(date +%s)"
+(
+  cd "$CD" || exit 97
+  "${ARGS[@]}" < "$PROMPT_FILE"
+) > "$RESULT_FILE" 2> "$LOG_FILE"
+EXIT_CODE=$?
+DURATION=$(( $(date +%s) - START_TS ))
+STATUS_AFTER="$(git -C "$CD" status --porcelain=v1 2>/dev/null || true)"
+
+RESULT_VALID=false
+if jq -e 'type == "object" and (.result | type == "string")' "$RESULT_FILE" >/dev/null 2>&1; then
+  RESULT_VALID=true
+else
+  warn "Claude の stdout が期待する JSON result ではない: $RESULT_FILE"
+fi
+
+if [ -s "$RESULT_FILE" ]; then
+  RESULT_SESSION="$(jq -r '.session_id // empty' "$RESULT_FILE" 2>/dev/null || true)"
+  [ -z "$RESULT_SESSION" ] || SESSION_ID="$RESULT_SESSION"
+fi
+
+TOKENS_IN="$(jq -r '(.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0) + (.usage.cache_read_input_tokens // 0)' "$RESULT_FILE" 2>/dev/null || true)"
+TOKENS_OUT="$(jq -r '.usage.output_tokens // 0' "$RESULT_FILE" 2>/dev/null || true)"
+TOKENS_TOTAL=""
+case "$TOKENS_IN:$TOKENS_OUT" in
+  *[!0-9:]*) ;;
+  :*|*:) ;;
+  *) TOKENS_TOTAL=$((TOKENS_IN + TOKENS_OUT)) ;;
+esac
+COST_USD="$(jq -r '.total_cost_usd // empty' "$RESULT_FILE" 2>/dev/null || true)"
+
+LIMIT_PATTERN='rate.?limit|quota.*(exceed|exhaust)|resource.?exhausted|too many requests|usage.?limit|credit balance'
+COOLDOWN_RECORDED=false
+RESULT_LIMIT=false
+if jq -e --arg pattern "$LIMIT_PATTERN" \
+  '(.is_error // false) == true and ((.error // .result // "" | tostring) | test($pattern; "i"))' \
+  "$RESULT_FILE" >/dev/null 2>&1; then
+  RESULT_LIMIT=true
+fi
+RAW_RESULT_LIMIT=false
+if ! jq -e . "$RESULT_FILE" >/dev/null 2>&1 && grep -qiE "$LIMIT_PATTERN" "$RESULT_FILE" 2>/dev/null; then
+  RAW_RESULT_LIMIT=true
+fi
+if [ "$EXIT_CODE" -ne 0 ] && { grep -qiE "$LIMIT_PATTERN" "$LOG_FILE" 2>/dev/null || [ "$RESULT_LIMIT" = true ] || [ "$RAW_RESULT_LIMIT" = true ]; }; then
+  set_cooldown "auto: limit pattern detected(exit $EXIT_CODE, $RUN_ID)"
+  COOLDOWN_RECORDED=true
+fi
+
+TREE_CHANGED=false
+FINAL_EXIT="$EXIT_CODE"
+if [ "$RESULT_VALID" = false ] && [ "$FINAL_EXIT" -eq 0 ]; then
+  FINAL_EXIT=4
+fi
+if [ "$STATUS_BEFORE" != "$STATUS_AFTER" ]; then
+  TREE_CHANGED=true
+  warn "read-only Claude review の実行中に git status が変化した。並行書き込みがないことと diff を確認する"
+  [ "$FINAL_EXIT" -ne 0 ] || FINAL_EXIT=3
+fi
+
+RUN_RECORD="$(jq -cn \
+  --arg run_id "$RUN_ID" --arg ts "$(iso_now)" --arg orchestrator "codex" \
+  --arg cli "claude" --arg kind "レビュー" --arg model "$MODEL" --arg effort "$EFFORT" \
+  --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
+  --arg result_file "$RESULT_FILE" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
+  --arg tokens_in "$TOKENS_IN" --arg tokens_out "$TOKENS_OUT" --arg tokens_total "$TOKENS_TOTAL" \
+  --arg cost_usd "$COST_USD" --arg status_before "$STATUS_BEFORE" --arg status_after "$STATUS_AFTER" \
+  --arg cmd "$CMD_DISPLAY" --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
+  --argjson runner_exit_code "$FINAL_EXIT" --argjson result_valid "$RESULT_VALID" \
+  --argjson tree_changed "$TREE_CHANGED" --argjson cooldown_recorded "$COOLDOWN_RECORDED" \
+  '{run_id:$run_id,ts:$ts,orchestrator:$orchestrator,cli:$cli,kind:$kind,model:$model,effort:$effort,
+    permission_mode:"plan",safe_mode:true,cd:$cd,prompt_file:$prompt_file,log_file:$log_file,
+    result_file:$result_file,resume_of:(if $resume_of=="" then null else $resume_of end),session_id:$session_id,
+    exit_code:$exit_code,runner_exit_code:$runner_exit_code,result_valid:$result_valid,
+    duration_s:$duration_s,tokens_in:($tokens_in|tonumber? // null),
+    tokens_out:($tokens_out|tonumber? // null),tokens_total:($tokens_total|tonumber? // null),
+    cost_usd:($cost_usd|tonumber? // null),tree_changed:$tree_changed,cooldown_recorded:$cooldown_recorded,
+    git_status_before:$status_before,git_status_after:$status_after,cmd:$cmd}')" \
+  || die "runs.jsonl 用 JSON の生成に失敗"
+reject_log_symlink "$RUNS_JSONL" "runs.jsonl"
+if ! printf '%s\n' "$RUN_RECORD" >> "$RUNS_JSONL"; then
+  die "runs.jsonl への追記に失敗: ${RUNS_JSONL}。同一コマンドを sandbox escalation で再実行する。ログ先変更はユーザー明示設定のみ"
+fi
+
+echo "run_id: $RUN_ID"
+echo "exit_code: $FINAL_EXIT (claude: $EXIT_CODE, duration: ${DURATION}s)"
+echo "session_id: $SESSION_ID"
+[ -n "$TOKENS_TOTAL" ] && echo "tokens: in=$TOKENS_IN out=$TOKENS_OUT total=$TOKENS_TOTAL"
+[ -n "$COST_USD" ] && echo "cost: \$$COST_USD USD"
+echo "result: $RESULT_FILE"
+echo "log: $LOG_FILE"
+[ "$COOLDOWN_RECORDED" = false ] || warn "limit を検知し Claude を1時間 cooldown に記録した"
+exit "$FINAL_EXIT"

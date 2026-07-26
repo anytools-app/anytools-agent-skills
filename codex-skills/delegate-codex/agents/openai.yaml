@@ -1,0 +1,78 @@
+interface:
+  display_name: "Delegate for Codex"
+  short_description: "Codex subagents with Claude-first independent review"
+  default_prompt: >-
+    Use $delegate-codex for this task. Route standard review to Claude sonnet/high,
+    high review to opus/high, and only critical review to fable/high. Critical means
+    authentication or authorization boundaries, billing or money, customer or
+    production data, secrets/signing/supply chain, or production migrations that
+    are also destructive, irreversible, broad, hard to roll back, or cross multiple
+    systems; local reversible changes in those domains remain high and use Opus.
+    Skill invocation does not authorize external AI transfer. The only
+    standing-approval exception is Anthropic Claude Fable fable/high read-only
+    critical review of a user-designated or open user-managed repository, limited
+    to the target source and necessary related code, target diff, secret-checked and
+    masked test results, and a minimal non-secret task summary. Never include .env
+    files, private keys, authentication or access tokens, database connection
+    strings, customer or personal data, production logs, authenticated browser
+    state, or raw delegation logs. Before using standing approval, internally verify
+    every condition, minimize the exact files and categories sent, preserve
+    delegate-review safe-mode/plan/Read,Glob,Grep/no-MCP constraints, and forbid
+    edits, commits, pushes, and additional network actions. Record
+    'tier=最重要; standing approval 使用; 送信対象カテゴリ=<実際のカテゴリ>' in both
+    the final report and delegate-log note. Anything outside these conditions, any
+    unclear or broader scope, fable/max, any non-Fable external AI including Sonnet
+    and Opus, or external implementation/write/additional-network work requires
+    task-specific explicit approval. Opus standing approval is currently unsupported;
+    Opus remains task-specific explicit until the user explicitly authorizes a limited
+    standing scope and the policy is updated. Never silently fall back from required Fable to
+    Opus, Sonnet, or another external AI. If required Opus is unavailable, never
+    silently fall back to Sonnet or use an alternative external AI without
+    task-specific explicit approval. Before the final response, require a successful
+    bin/delegate-log entry for every task, including self/native-only and no-review
+    tasks, and report its recorded path. When using subagents, generate one task_id
+    with delegate-log --new-task-id and one delegation_id per delegation. The main
+    Codex records dispatched immediately after spawn, followup immediately after
+    each follow-up, and completed or failed only when it closes the delegation with
+    no further follow-up pending; never depend on the subagent to log itself. Keep
+    a provisional completion notification non-terminal while another request may
+    follow. Use the canonical agent task name and the instruction ownership scope,
+    then write the final task_summary with the same task_id after every event and
+    require delegate-log --audit-all to pass. Direct/self work needs no delegation
+    event. delegate-log validates lifecycle under the same append lock and rejects
+    duplicate dispatch, followup without dispatch, events after terminal, terminal
+    without dispatch, terminal after terminal, and summaries while effective
+    delegations remain open without changing line count. Existing locks are never
+    auto-deleted; after a bounded wait, delegate-log fails closed until the operator
+    manually verifies no active delegate-log owns the lock. Historical bad lifecycle
+    rows are corrected append-only with delegation_correction; never delete or
+    rewrite log rows, and never correct a healthy open delegation that has exactly
+    one dispatch and no terminal event. Successful/adopted explicit or standing Claude summaries and completed
+    events require the delegate-review run_id; only pre-run failure or incomplete
+    records may omit it. Pass --approval-basis standing --effort high
+    only for eligible critical fable/high reviews and include the required note
+    markers; use --approval-basis explicit --effort high for task-approved Sonnet/high
+    or Opus/high and --approval-basis explicit --effort max for task-approved
+    fable/max; use --approval-basis none and effort unknown when appropriate for self,
+    native-only, and no-external-transfer tasks. Claude, Grok, and Antigravity
+    (agent=claude|grok|agy) must use explicit or standing regardless of kind and
+    must never use approval_basis=none. Existing standing guards allow only eligible
+    critical fable/high review. Keep every note on
+    one line: reject CR, LF, and TAB while allowing normal Japanese text, spaces, and
+    semicolons. Never source the skill-local .env as shell; statically accept only
+    DELEGATE_CODEX_LOG_DIR and CLAUDE_BIN assignments and reject symlinks, unknown
+    keys, control characters, and shell syntax. Keep the existing risk enum: record
+    both high and critical as risk=高 and record Fable standing as tier=最重要 in the
+    note. The logger must write approval_basis, effort, required_model, actual_model,
+    and review_status; standard requires sonnet, high requires opus, critical
+    requires fable, missing required review is blocked_approval and routing 過小,
+    higher-than-required actual review is 過剰, and missing or lower-than-Fable
+    critical review keeps outcome 未完了 or 失敗. The logger must fail closed on invalid
+    standing model/effort/risk metadata. If the managed sandbox denies the default
+    persistent log path, rerun the same delegate-log command with the execution
+    environment's sandbox escalation; this is not a delegate-log flag. If escalation
+    is denied, report the literal error and leave the task incomplete. Do not silently
+    switch to a repository, worktree, or temporary path; only a user-explicit
+    persistent, absolute, writable, non-worktree DELEGATE_CODEX_LOG_DIR is allowed.
+policy:
+  allow_implicit_invocation: true
