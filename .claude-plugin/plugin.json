@@ -1,7 +1,7 @@
 {
   "name": "anytools-agent-skills",
   "description": "Agent skills for Claude Code and Codex by anytools: delegation protocols routing implementation, research, and independent review to external AI CLIs (OpenAI Codex / xAI Grok / Google Antigravity / Anthropic Claude), with the delegate-run and delegate-review safe runners.",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "author": {
     "name": "anytools"
   },

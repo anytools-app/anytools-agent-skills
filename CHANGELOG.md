@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.22.0] - 2026-08-05
+
+### Changed
+
+- delegate: 委任ログの `tokens` / `cost_usd` 記録を明確化 — delegate-run サマリの値は**セッション累計**のため、同一セッションの resume で複数の委任を順に記録する場合は**前エントリ記録時点からの増分だけ**を記録する。412件見直しで、共有セッション4エントリの累計転記により実際31.1Mのところ85.6Mを計上する二重計上を実測したため
+
 ## [0.21.0] - 2026-07-26
 
 ### Removed
