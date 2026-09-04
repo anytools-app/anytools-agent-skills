@@ -2,13 +2,13 @@
 
 役割: **大きなコードベースの構造把握・横断的な依存調査**(広い文脈を渡す読解)、**Google Search を併用した公式ドキュメント調査**(ヘッドレスでも web 検索を使うことを実測済み。特に Google Cloud / Firebase / Android / Gemini API 周辺)、**独立レビューの持ち回り担当の一角**(仕様逸脱・副作用・テスト不足を別モデル視点で洗う — 担当の選び方は `SKILL.md`「独立レビュー」)、技術文脈の**第三意見**(X/速報文脈なら Grok)、OpenAI / xAI クォータを温存したい read-only 相談、隔離 worktree での比較実装。実装のデフォルトにはしない。
 
-## モデル表(2026-07 実測)
+## モデル表(2026-09-04 実測)
 
-`--model` には `agy models` の表示名をそのまま渡す(実測一覧: Gemini 3.5 Flash Low/Medium/High・Gemini 3.1 Pro Low/High・Claude Sonnet/Opus 4.6・GPT-OSS 120B):
+`--model` には `agy models` の表示名をそのまま渡す(実測一覧: Gemini 3.8 / 3.7 / 3.6 Flash Low/Medium/High・Gemini 3.1 Pro Low/High・Claude Sonnet/Opus 4.6 (Thinking)・GPT-OSS 120B (Medium)。2026-09-04 に `Gemini 3.5 Flash (Low)` が not recognized で失敗し Flash 系は 3.6〜3.8 に置き換わっていた):
 
 | タスク | モデル |
 |---|---|
-| 軽い相談・要約・機械的読解 | `"Gemini 3.5 Flash (Low)"` / `"(Medium)"` |
+| 軽い相談・要約・機械的読解 | `"Gemini 3.8 Flash (Low)"` / `"(Medium)"` |
 | 深い読解・独立レビュー・第三意見 | `"Gemini 3.1 Pro (High)"` |
 
 - 独立レビュー・第三意見には Gemini 系を選ぶ(Claude Sonnet/Opus 4.6 も選べるが司令塔と同系で視点が重複し、独立性が下がる)
