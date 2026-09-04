@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.23.0] - 2026-09-05
+
+### Changed
+
+- delegate: Codex モデル表を GPT-6 Astra + GPT-5.6 混成へ更新。難所を `gpt-6-astra / high`、重要・高リスクと分割不能な最難関の技術設計レビューを `gpt-6-astra / max` に変更し、Sol は Astra のフォールバックと深い read-only 相談の主力に位置づける。通常実装の Luna / Terra は維持
+- Astra ティアの canary 運用を開始(2026-09-05)。委任ログの `note` に `canary` を記録して昇格・差し戻しを判断し、利用不可・不適時は同じ effort の Sol へ明示的にフォールバックする。GPT-5.6 の canary 完了実績は履歴として維持
+- 現行一覧から消滅したモデルをフォールバック表から除去し、Terra のフォールバック先を `gpt-5.5` に更新。`gpt-5.4-mini` の deprecate・Luna 移行予告を注記し、capacity 時の案内も現行表に追随
+- `models_cache.json` の `visibility:"list"` からモデル一覧を確認する `jq` 手順を追加。キャッシュの更新日時を確認し、非公開モデルを委任対象から除外して、現行一覧とのずれをモデル表へ反映する
+
 ## [0.22.0] - 2026-08-05
 
 ### Changed
