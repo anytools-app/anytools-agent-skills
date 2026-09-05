@@ -106,6 +106,27 @@ assert_not_contains "agy resume: --continue 不使用" " --continue"
 run "$BIN" --dry-run --cli agy --mode readonly --model "Gemini 3.5 Flash (Low)" --effort high --cd "$NONGIT" --prompt-file "$PROMPT"
 assert_exit "agy --effort 拒否" 2
 
+# ── 共通: -o は全 CLI で受理し、ネイティブフラグとしては codex だけに渡す ──
+run "$BIN" --dry-run --cli grok --mode readonly --cd "$NONGIT" --prompt-file "$PROMPT" -o "$TMP/r.md"
+assert_exit "grok -o dry-run 成功" 0
+assert_not_contains "grok -o: codex 専用として拒否しない" "codex 専用"
+assert_not_contains "grok -o: ネイティブフラグは渡さない" " -o "
+
+run "$BIN" --dry-run --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" --cd "$NONGIT" --prompt-file "$PROMPT" -o "$TMP/r.md"
+assert_exit "agy -o dry-run 成功" 0
+assert_not_contains "agy -o: codex 専用として拒否しない" "codex 専用"
+assert_not_contains "agy -o: ネイティブフラグは渡さない" " -o "
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT" -o "$TMP/r.md"
+assert_exit "codex -o dry-run 成功" 0
+assert_contains "codex -o: ネイティブフラグを渡す" " -o "
+assert_contains "codex -o: 保存先を渡す" "$TMP/r.md"
+
+# ── Codex: --timeout は引き続き agy 専用として拒否 ──
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT" --timeout 10
+assert_exit "codex --timeout 拒否" 2
+assert_contains "codex --timeout: 理由表示" "--timeout は agy 専用"
+
 # ── 共通: prompt file 必須・存在チェック / dry-run は JSONL に書かない ──
 run "$BIN" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$TMP/nai.md"
 assert_exit "prompt file 不存在エラー" 2

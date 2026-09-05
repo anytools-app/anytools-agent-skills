@@ -32,6 +32,13 @@
 - workspace-write sandbox は**ネットワーク listen も制限**され、dev server・listen を伴うテストは委任先で実行できない(2026-07-12 実測2件。1件は初回納品にバグ残留として顕在化)→ 該当プロジェクトでは指示書に「テスト実施は司令塔で行うので、動く状態にしておくこと」を明記する(`templates.md` 記入時の注意 3)
 - **「model at capacity」はサーバ側の一時飽和で、アカウントの limit ではない** → cooldown を記録せず、フォールバック表のモデル(Terra なら `gpt-5.5`)へ明示的に切り替えて続行する(2026-07-13 実測: capacity で即失敗 → gpt-5.4 で一発成功。これは当時のフォールバック先。現行の対応表は `adapters/codex.md` を参照。委任ログの model には実際に使ったモデルを記録)
 
+### 2026-08〜09 / 委任ログ見直し(v0.24.0)
+
+- **委任先の「テスト成功」申告を信用しない(2026-08-27〜08-30 実測3件、terra/high)**: 「npm test 成功」と報告されたが、実際は既存テストが失敗していた。司令塔が検証コマンドを再実行して検出 → 指示書の完了条件に「検証コマンドの実行結果(末尾のサマリ行)を最終レポートに貼る」を含め、司令塔は申告に関係なく必ず自分で再実行してベースラインと比較する(`SKILL.md`「成果物レビュー」3の運用徹底)
+- **spark の usage limit はモデル別(2026-08-25 実測3件)**: `gpt-5.3-codex-spark` の limit は他モデルに波及しない。delegate-run が limit パターンで codex 全体の cooldown を自動記録した場合は誤検知として `--clear-cooldown codex` し、luna / terra へ切り替えて続行する(cooldown は spark だけ避ける運用)
+- **codex 側の別スキル(`delegate-codex`)が exec 内で干渉する(2026-09-02 実測、2026-09-05 再現)**: Codex を司令塔にする用途の `delegate-codex` スキルが `codex exec` 内でも読み込まれ、リポジトリ外の委任ログ(`delegate-log`)の lock 取得失敗や無関係メモの読み込みに予算を消費して実装未到達(変更ゼロ)になった。2026-09-05 は実装自体は完了したが lock エラーを再現 → 実装指示書の末尾定型にリポジトリ外の読み込み・実行を禁止する範囲ガードを入れる(`templates.md`「1. 実装指示書」)。最終レポートに「委任評価ログ未記録」「lock を取得できない」等の記述があっても、それは委任先環境の話であり成果物の欠陥ではない(司令塔側のログ記録には影響しない)
+- **セッション継続を理由に sol/max を小変更へ使わない(2026-08-19 実測4件、`過剰`)**: 採用済み UI への小さな変更依頼を、文脈があるからと同一 sol/max セッションの resume で続けると、1件あたり luna / terra の10倍前後のトークンを消費する。文脈が必要なら指示書に現状と変更点を書いて新規セッションを luna / terra で開く。新規571件で codex 実装費用の76%が sol に集中した主因の一つ
+
 ## Grok
 
 - 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する(2026-07-11 クレジット購入後に read-only スモークで疎通確認済み: exit 0・2秒・sessionId 取得。同日実測でモデルラインナップが grok-4.20/4.3/4.5 系へ変わり、`--output-format json` の応答構造も `{text, stopReason, sessionId, requestId}` に変化 — `type` フィールド無し。delegate-run の sessionId 抽出はそのまま動作)
@@ -50,11 +57,13 @@
 - `~/.gemini/antigravity-cli/cache/last_conversations.json` はディレクトリ単位で最新IDに上書きされる → 実行のたびに UUID を控える
 - 「Individual quota reached」= 個人クォータ到達。リセットまで**約108時間(4.5日)**表示の実測あり(2026-07-12、9秒で失敗・書き込みなし)→ `delegate-run --set-cooldown agy 108h` で記録し、大規模読解・独立レビューは grok-4.5 へ代替(`SKILL.md`「委任先の limit と cooldown」)
 - **read-only 相談でも対象リポジトリ直下に `.serena/`(serena MCP のプロジェクトインデックス: cache/memories/project.local.yml)を無断作成した実測あり(2026-07-17、200stack-local)**。コード変更ではないがツリーを汚す。相談後の `git status --short` 確認で検出し `rm -rf .serena` で除去。頻発するなら worktree 隔離条件(adapters/antigravity.md)に「serena 併用時」を追加検討
+- **headless 失敗が高率(2026-08-14〜09-05 の独立レビュー32件中11失敗、v0.24.0)**: 内訳は command 権限の auto-deny 4件・個人クォータ3件・`--print-timeout` 超過2件(350KB級の diff)・司令塔のフラグ誤用1件・依頼書の矛盾(コマンド禁止と git diff 読取指示の両立)1件 → 持ち回りで agy を選ぶ前に `delegate-run --cooldowns` を確認し、依頼書には diff・指示書を全てインラインで同梱してコマンド実行を要求しない。大きい diff は `--print-timeout 30m` でも間に合わないので分割する。**失敗時の代替は grok に固定せず、直近で最も使っていない系統(実測では claude-agent)へ倒す**(代替が grok に集中して持ち回りが grok 70 / agy 32 / claude-agent 21 に偏った)
 
 ## Claude サブエージェント(独立レビュー・調査)
 
 - **general-purpose を独立レビュアーとして使う運用が有効(2026-07-12、agy cooldown 中の4件で確立)**: agy が個人クォータ枯渇(108h)の間、high リスク変更(D1互換アダプタ・alarm駆動エンジン・better-auth スキーマ・認証境界・ログイン悪用対策)の独立レビューを Agent ツールの general-purpose(読み取り専用指示)に振り、4件すべて routing 適正・採用。実コード/実 .d.mts を根拠に file:line 付きで指摘し、**全員が見落とした欠陥を単独発見した実績が複数**(alarm 駆動化での 60s バックオフ消失、better-auth の runtime .mjs と .d.mts の食い違い、XFF 詐称でのレート制限回避、Turnstile 公開値ゲートの黙殺無効化)。同期間の grok-4.20 レビュー2件が cause:model(反証可能な blocker)だったのと対照的 → **agy cooldown 中の独立レビューは grok より Claude サブエージェント(general-purpose、読み取り専用+攻撃者視点の指示)を優先する**。依頼書は scratchpad に組み立て(指示書原文+diff+観点)、`git status`/snapshot で書き込みなしを確認する運用は agy と同じ。デフォルトのレビュアー表(SKILL.md)は agy のままで変えない(委任先ミスではないため)— これは cooldown 時の代替の優先順位付け
 - 大規模コードリーディングは Explore、判断を伴う調査は general-purpose/sonnet。返答をパス・行番号・結論に絞らせ、ファイル全文をメイン会話に持ち込まない規律は SKILL.md どおり。3〜4件の調査すべて採用(境界棚卸し・API 実物確認が指示書を一発化した)
+- **API 529 Overloaded は environment(2026-09-03 実測、v0.24.0)**: opus の Explore 調査5件が同日に2回ずつ途中終了 → `cause:"environment"` で記録し、同じ依頼を sonnet で再投入して成功した。529 が続く時間帯は opus を避けて sonnet に落とす
 
 ## テスト実行の場所(sandbox listen 制限)
 
@@ -152,6 +161,8 @@ jq -s 'group_by(.commander) | map({
 4. **担当**: レビュー持ち回りと同じ3系統から、直近で監査に使っていない系統。問いは「この委任は (a) そもそも委任すべきだったか (b) CLI/モデル/effort は適切だったか(過剰・過小含む) (c) 手戻りの根因分類は何か (d) この成果物を採用した判断は妥当か」
 5. **突き合わせ**: 監査者の判定と自己採点の**不一致件数と軸**を記録する。監査自体は通常の委任として委任ログに記録(kind:"レビュー"、task 先頭に「司令塔監査:」)し、不一致率は scorecard 行の `audit_disagreement` に入れる
 6. **昇格条件**: 不一致が**同じ軸で3件以上偏った場合のみ**対処する(例: cause 分類が毎回甘い → 記録規約の定義を締める / 過剰の見逃しが偏る → ティア選択の既定を下げる)。単発の不一致は監査者の誤りの可能性もあるため、原典(diff・検証結果)で裏取りしてから採否を決める — 監査者の判定も鵜呑みにしない(このスキルの大原則)
+
+- **監査材料の保全(2026-09-05 実測、2回目監査 v0.24.0)**: 指示書は scratchpad(セッション単位で消える)に置くため、前回監査以降の実装 364 件中 71 件しか指示書が現存せず、サンプルが特定リポジトリに偏った。また delegate-run の `-o` レポートは初回実行分だけで、resume の成果(追加ファイル)が材料に載らず監査者が「未列挙モジュール」と誤検知した → 次回改修で **run 完了時に指示書を `$LOG_DIR/instructions/<run_id>.md` へ自動退避**し、監査材料は「対象コミットの `git show --stat` 全体」を正にして report の一覧と突き合わせる。2回目監査の結果: raw 4/20・確定 2/20(a・b 軸は 5/5 一致。確定は同一委任の「仕様値の置換(既定値 `""` を本番 URL に)+ 上限件数の slice 欠落 + 変更ファイル未列挙」を司令塔が一発合格と記録した見逃しで、`cause` と `scope_violation` を訂正。c 軸の不一致 3 件は確定 1・保留 2 で、次回も c 軸に偏れば cause 定義を締める)
 
 ### ルーティング表・モデル表の更新条件
 
