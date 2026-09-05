@@ -9,10 +9,11 @@
 #
 # 使い方:
 #   delegate-run --cli codex --mode write --model gpt-5.6-terra --effort medium \
-#     --cd /path/to/repo --prompt-file /path/to/instruction.md [-o report.md] [--dry-run]
+#     --cd /path/to/repo --prompt-file /path/to/instruction.md [--dry-run]
 #   delegate-run --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" \
 #     --cd /path/to/repo --prompt-file question.md [--timeout 10]
 #   delegate-run --cli grok --mode readonly --effort medium --cd /path/to/repo --prompt-file q.md
+#   共通: -o <file> / --out-report <file>: 最終レポートの保存先。codex はネイティブの -o、grok / agy はログのコピー
 #   resume/継続: --resume <SESSION_ID|CONVERSATION_UUID>(全フラグは自動で付け直される)
 #
 # cooldown(limit を踏んだ CLI を記録し、回復まで実行前に拒否する):
@@ -463,7 +464,7 @@ while [ $# -gt 0 ]; do
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -490,7 +491,6 @@ case "$CLI" in
   grok)
     [ -x "$GROK_BIN" ] || die "grok CLI が見つからない: $GROK_BIN(フルパス呼び出しが前提)"
     # --model は任意: 未指定は CLI 既定(軽い相談用)、深い相談・独立レビューは grok-4.5(adapters/grok.md のモデル表)
-    [ -n "$REPORT" ] && die "-o/--out-report は codex 専用"
     [ -n "$TIMEOUT_MIN" ] && die "--timeout は agy 専用"
     if [ "$MODE" = "write" ] && [ -z "$MAX_TURNS" ]; then MAX_TURNS=40; fi
     ;;
@@ -498,7 +498,6 @@ case "$CLI" in
     [ -x "$AGY_BIN" ] || die "agy CLI が見つからない: $AGY_BIN"
     [ -n "$MODEL" ] || die "agy は --model 必須(agy models の表示名をそのまま渡す)"
     [ -n "$EFFORT" ] && die "agy に effort 指定はない(モデル名の Low/High で選ぶ)"
-    [ -n "$REPORT" ] && die "-o/--out-report は codex 専用"
     [ -z "$TIMEOUT_MIN" ] && TIMEOUT_MIN=10
     ;;
 esac
@@ -592,6 +591,15 @@ EXIT_CODE=$?
 DURATION=$(( $(date +%s) - START_TS ))
 DIRTY_AFTER="$(git_dirty || echo "")"
 
+# ── 最終レポート(codex はネイティブの -o、grok / agy はログのコピー)──
+case "$CLI" in
+  grok|agy)
+    if [ -n "$REPORT" ]; then
+      cp "$LOG_FILE" "$REPORT" || warn "レポートへのログコピーに失敗: $REPORT"
+    fi
+    ;;
+esac
+
 # ── session / conversation ID の取得 ──────────────────
 SESSION_ID=""
 case "$CLI" in
@@ -652,7 +660,12 @@ elif [ -n "$TOK_TOTAL" ]; then
   echo "cost: 単価未設定 — .env の COST_PER_MTOK_$(echo "$CLI" | tr '[:lower:]-' '[:upper:]_') に「月額USD ÷ 月間総トークン(百万)」を設定すると換算される"
 fi
 echo "log: $LOG_FILE"
-[ -n "$REPORT" ] && echo "report: $REPORT"
+if [ -n "$REPORT" ]; then
+  case "$CLI" in
+    grok|agy) echo "report: $REPORT(ログのコピー)" ;;
+    codex) echo "report: $REPORT" ;;
+  esac
+fi
 if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
   echo "git: dirty $DIRTY_BEFORE → $DIRTY_AFTER 件(マニフェスト照合を忘れずに)"
 fi

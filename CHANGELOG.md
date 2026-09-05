@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.24.0] - 2026-09-05
+
+### Changed
+
+- delegate: 委任ログ1131件(新規571件)の見直しを lessons へ反映。Codex のテスト成功申告の再検証・spark のモデル別 usage limit・別スキルの exec 内干渉・sol/max の小変更への過剰利用の4件、Antigravity の headless 失敗と代替先の偏り、Claude サブエージェントの API 529 Overloaded の計6件の教訓を追記
+- 実装指示書テンプレートの末尾にリポジトリ外のログ・ワークフロー・スキルの読み込みと実行を禁止する範囲ガードを追加し、削除しない注意を明記。Codex adapter に、セッション継続を理由に小変更を sol/max の resume で続けず、現状と変更点を指示書に書いて luna / terra の新規セッションへ渡す規約を追記
+- `delegate-run -o/--out-report` を全 CLI で受理。codex は従来のネイティブ `-o`、grok / agy は実行後のログ全体のコピーとして保存し、コピー失敗は警告に留める。サマリにログのコピーであることを表示し、CLI ごとのフラグ転送と codex の `--timeout` 拒否を dry-run テストへ追加。テスト132→143件
+
 ## [0.23.0] - 2026-09-05
 
 ### Changed
