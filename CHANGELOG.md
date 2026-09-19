@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.25.0] - 2026-09-13
+
+### Changed
+
+- delegate: 日本語の文章作成・チェック(ドキュメント・README・告知文・UI 文言案などの作成と校正)のデフォルト委任先を Antigravity に追加。Antigravity adapter のモデル表で、作成・通常チェックは `Gemini 3.8 Flash (Medium)`、短文の誤字・表記ゆれだけを見る軽いチェックは `(Low)` を指定
+- 適用範囲を成果物としての日本語文章に限定し、司令塔の応答・最終報告・コミットメッセージは委任しないことを明記。一意に決まらない文言は従来どおり製品判断としてユーザー確認し、コードの独立レビューの持ち回りとは別枠とする。Antigravity の cooldown 時の代替先に Claude サブエージェント(sonnet)を追加
+
 ## [0.24.0] - 2026-09-05
 
 ### Changed
