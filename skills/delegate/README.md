@@ -11,6 +11,7 @@ Turns Claude Code into an **orchestrator** which safely delegates implementation
 - everyday implementation → **Codex**
 - web/X and breaking-news research → **Grok**
 - large-context reading, docs research, independent review → **Antigravity (Gemini)**
+- Japanese writing and proofreading → **Antigravity (Gemini Flash)**
 - cheap pre-design code reading → **Claude subagents**
 
 Every delegation goes through an auditable loop: baseline measurement → written instruction → sandboxed execution via `bin/delegate-run` → file-manifest cross-check → full diff review → one-line JSONL log entry. Rate-limited CLIs are recorded as cooldowns and rejected before execution instead of being retried every time.

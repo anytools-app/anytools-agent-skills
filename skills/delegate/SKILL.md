@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: 外部AI CLI(OpenAI Codex・xAI Grok・Google Antigravity)への作業委任とモデルルーティングの手順。Claude Codeが司令塔として設計・実装指示書の作成・成果物レビュー・コミットを担当し、実装はCodex、Web/X検索が要る調査や速報系の第三意見はGrok、大規模読解・Google検索付きドキュメント調査・独立レビューはAntigravity(Gemini)、事前のコードリーディングは安価なClaudeサブエージェントに振ってトークンとクォータを節約する。詳細設計は外部AIに最終判断として丸投げせず、Antigravity / Codex read-only / Grok にドラフト・代替案・リスク洗い出しを委任し、Claude Codeが採否を決めて実装指示書へ落とし込む。トリガー例:「codexに実装させて」「codexで実装」「codexに任せて」「codexと相談」「grokに聞いて」「grokと相談」「grokに調べさせて」「geminiに聞いて」「antigravityでレビュー」「agyに相談」「委任して」「セカンドオピニオンが欲しい」「詳細設計を作らせて」「詳細設計を委任」「実装前に設計を詰めて」「設計案を起こして」「詳細設計ドラフトを作って」。書き込み不要の調査・相談はCodex/Grokではread-onlyサンドボックス、Antigravityではread-only意図+実行後diff確認で運用する。
+description: 外部AI CLI(OpenAI Codex・xAI Grok・Google Antigravity)への作業委任とモデルルーティングの手順。Claude Codeが司令塔として設計・実装指示書の作成・成果物レビュー・コミットを担当し、実装はCodex、Web/X検索が要る調査や速報系の第三意見はGrok、大規模読解・Google検索付きドキュメント調査・独立レビューはAntigravity(Gemini)、日本語の文章作成・チェックはAntigravity(Gemini Flash)、事前のコードリーディングは安価なClaudeサブエージェントに振ってトークンとクォータを節約する。詳細設計は外部AIに最終判断として丸投げせず、Antigravity / Codex read-only / Grok にドラフト・代替案・リスク洗い出しを委任し、Claude Codeが採否を決めて実装指示書へ落とし込む。トリガー例:「codexに実装させて」「codexで実装」「codexに任せて」「codexと相談」「grokに聞いて」「grokと相談」「grokに調べさせて」「geminiに聞いて」「antigravityでレビュー」「agyに相談」「委任して」「セカンドオピニオンが欲しい」「詳細設計を作らせて」「詳細設計を委任」「実装前に設計を詰めて」「設計案を起こして」「詳細設計ドラフトを作って」。書き込み不要の調査・相談はCodex/Grokではread-onlyサンドボックス、Antigravityではread-only意図+実行後diff確認で運用する。
 ---
 
 # 外部AI委任とモデルルーティング(中核規約)
@@ -30,11 +30,13 @@ Claude Code が司令塔として設計・指示書・レビュー・採否・�
 | リポジトリ内のコード調査・原因調査(read-only) | Codex(read-only。深い根本原因調査は sol) |
 | Web/X・速報系の調査、コミュニティ色の強い第三意見 | Grok |
 | 大規模読解、Google検索付きドキュメント調査、技術文脈の第三意見 | Antigravity(Gemini) |
+| 日本語の文章作成・チェック(ドキュメント・README・告知文・UI 文言案などの作成と校正) | Antigravity(Gemini Flash。モデルは adapter) |
 | 独立レビュー | Antigravity / Claude サブエージェント / Grok の**持ち回り**(下記「独立レビュー」) |
 | リポジトリ外の調査(委任ログ・transcript・~/.claude・env)、広い機械的読み・安価な探索 | Claude サブエージェント |
 | 最終設計、製品判断、採否、コミット | Claude Code(委任しない) |
 
 - 設計判断を委任先に丸投げしない。詳細設計の委任は「ドラフト」まで(下記「タスク種別」)
+- 日本語の文章作成・チェックの対象は**成果物としての日本語文章**に限る。司令塔がユーザーに返す応答・最終報告・コミットメッセージは委任せず司令塔が書く。既存仕様から一意に決まらない文言は製品判断としてユーザーに確認し(下記「製品判断と技術判断」)、委任先には案出しとチェックだけを任せる。コードの独立レビューの持ち回りとは別枠
 - Codex / Grok / Antigravity の成果物・指摘は鵜呑みにせず、Claude Code が妥当性を判断してから反映する
 
 ## 窓口(司令塔モデル)の固定
@@ -183,6 +185,7 @@ Claude Code が決めてよい(技術判断):
 | limit 中の CLI | 代替 |
 |---|---|
 | Antigravity(大規模読解) | Grok `--model grok-4.5`(500k context。`adapters/grok.md`) |
+| Antigravity(日本語の文章作成・チェック) | Claude サブエージェント(sonnet) |
 | Antigravity / Grok(独立レビュー) | 持ち回りの残り系統へ(「独立レビュー」。Claude サブエージェントは limit しない) |
 | Grok(Web/X 調査) | Antigravity(Google Search 併用。`adapters/antigravity.md`) |
 | Codex(実装) | 高リスクでなければ Grok workspace 実装(`adapters/grok.md`)。または委任を分割して Claude Code が直接処理、急がなければ回復を待つ |

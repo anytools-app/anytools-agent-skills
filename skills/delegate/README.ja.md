@@ -11,6 +11,7 @@ Claude Code を**司令塔**にして、外部 AI CLI(OpenAI Codex / xAI Grok / 
 - 通常実装 → **Codex**
 - Web/X・速報系の調査 → **Grok**
 - 大規模読解・ドキュメント調査・独立レビュー → **Antigravity(Gemini)**
+- 日本語の文章作成・チェック → **Antigravity(Gemini Flash)**
 - 設計前の安価なコードリーディング → **Claude サブエージェント**
 
 にタスクを振り分けます。プロンプト集ではなく、**ベースライン計測 → 指示書 → sandbox付き実行 → マニフェスト照合 → diff レビュー → 委任ログ記録**という監査可能なループを規約化したものです。
