@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.0] - 2026-09-19
+
+### Added
+
+- delegate: `bin/delegate-route`(モデルティア判定ゲート)。独立した判定者(当面は Claude サブエージェント。信号は JSON で受け取り、LLM・外部 API は呼ばない)の 11 項目の信号から、決定式で推奨ティア・effort を出す。内容(対象範囲・挙動・完了条件・製品判断・曖昧さ)とモデルの未確定点を人間への質問として出力し、`--route-id` + `--human-facts` の再判定で確定するまで繰り返す(人間の回答が常に優先、回答済みの軸は再質問しない、連作はモデル軸のみ 24 時間保持)。判定履歴は `route-decisions.jsonl`
+- delegate: `gpt-6-astra` の週予算(直近 7 日で 8,000 万トークンまたは 8 件。`.env` の `ASTRA_WEEKLY_TOKEN_CAP` / `ASTRA_WEEKLY_COUNT_CAP`、残量は `delegate-route --budget`)。Astra の使用は信号が確定域でも毎回人間の承認が必要で、予算超過時の既定は `gpt-5.6-sol / high`
+- delegate-run: `--route-id`(`runs.jsonl` に記録)。`gpt-6-astra` は人間承認済みの route なしでは実行前に拒否。承認は指示書の SHA-256 に紐付き、effort は `high` / `max` かつ route の推奨と一致が必要で、成功した新規実行 1 回で消費される(同一セッションの resume は可)(強行は専用の `--force-astra` のみで `astra_forced:true` が残る。cooldown 用の `--force` では通らない)。実行後に指示書を `instructions/<run_id>.md` へ退避(0.24.0 で計画し未実装だったもの)
+- templates: 「4. ティア判定依頼書」(ブラインドの判定者へ渡す 11 問と出力スキーマ)
+
+### Changed
+
+- codex adapter: モデル表を改定。難所の主系統を `gpt-5.6-sol / high` に戻し、Astra は「分割不能な最難関 / 重要・高リスク / 下位ティアが cause:model で 2 回失敗した後の昇格」に限定、effort は `high` / `max` のみ、調査・相談・レビューには使わない。Astra canary を終了(182 件: 採用率・手戻りは良好だが、週次クォータの消費が同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍〔推定〕で、2 週間に週次枠を 4 回使い切った)
+- SKILL: 基本フローに手順 6.5「ティア判定と確定ループ」を追加。Codex のティアは司令塔が自分で決めず、確定するまで委任を開始しない
+- lessons: 1721 件見直しの実測(上位モデルのデフォルト化は司令塔の自己採点では検出できない、クォータはトークン数に比例しない)と、ティア判定の見直し指標を追記
+
 ## [0.25.0] - 2026-09-13
 
 ### Changed

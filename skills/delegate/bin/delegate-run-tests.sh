@@ -11,6 +11,10 @@ export DELEGATE_LOG_DIR="$TMP/logs"
 GITDIR="$TMP/repo"; mkdir -p "$GITDIR"; git -C "$GITDIR" init -q
 NONGIT="$TMP/plain"; mkdir -p "$NONGIT"
 PROMPT="$TMP/prompt.md"; echo "テスト指示" > "$PROMPT"
+PROMPT_SHA="$(shasum -a 256 "$PROMPT" | awk '{print $1}')"
+PROMPT_OTHER="$TMP/prompt-other.md"; echo "別のテスト指示" > "$PROMPT_OTHER"
+PROMPT_REVISED="$TMP/prompt-revised.md"; echo "改稿後のテスト指示" > "$PROMPT_REVISED"
+PROMPT_REVISED_SHA="$(shasum -a 256 "$PROMPT_REVISED" | awk '{print $1}')"
 
 run() { OUT="$("$@" 2>&1)"; CODE=$?; }
 ok()   { PASS=$((PASS+1)); }
@@ -393,6 +397,219 @@ printf '%s\n' \
 run env DELEGATE_LOG_DIR="$RW8" "$BIN" --audit-rework
 assert_exit "audit-rework warning(b): 指摘+数字は exit 1" 1
 assert_contains "audit-rework warning(b): 指摘+数字を検出" "rework警告(b): line 1"
+
+# ── Astra ゲート: delegate-route の承認済み判定がなければ実行前に拒否 ──
+mkdir -p "$DELEGATE_LOG_DIR"
+ROUTE_JSONL="$DELEGATE_LOG_DIR/route-decisions.jsonl"
+printf '%s\n' \
+  '壊れた route 行' \
+  "{\"route_id\":\"rt_open\",\"round\":1,\"gate\":\"ask_human\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":false,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_ok\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_max\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"max\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  '{"route_id":"rt_no_sha","round":1,"gate":"confirmed","recommend":{"model":"gpt-6-astra","effort":"high"},"astra_approved":true,"open":[]}' \
+  "{\"route_id\":\"rt_consume\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_legacy\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_fail_retry\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_latest\",\"round\":1,\"gate\":\"ask_human\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":false,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  '壊れた最新ラウンド手前の行' \
+  "{\"route_id\":\"rt_latest\",\"round\":2,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  "{\"route_id\":\"rt_demoted\",\"round\":1,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-5.6-sol\",\"effort\":\"high\"},\"astra_approved\":false,\"instruction_sha256\":\"$PROMPT_SHA\",\"open\":[]}" \
+  > "$ROUTE_JSONL"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra: --route-id なしは拒否" 2
+assert_contains "astra: route の案内表示" "delegate-route"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_nosuch
+assert_exit "astra: 未知の route_id は拒否" 2
+assert_contains "astra: 未知 route の理由表示" "route_id が無い"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_open
+assert_exit "astra: 未承認 route は拒否" 2
+assert_contains "astra: 未承認の理由表示" "承認済みでない"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_demoted
+assert_exit "astra: 推奨が sol に落ちた route は拒否" 2
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra: 承認済み route なら通過" 0
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_latest
+assert_exit "astra JSONL: 壊れた行を飛ばして最新 route を取得" 0
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_no_sha
+assert_exit "astra: route 側 sha 欠落は拒否" 2
+assert_contains "astra: route 側 sha 欠落の理由表示" "instruction_sha256 が無い"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT_OTHER" --route-id rt_ok
+assert_exit "astra: prompt sha 不一致は拒否" 2
+assert_contains "astra: prompt sha 不一致の理由表示" "instruction_sha256 が一致しない"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra effort: 未指定は拒否" 2
+assert_contains "astra effort: 未指定の理由表示" "effort"
+for BAD_EFFORT in medium low; do
+  run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort "$BAD_EFFORT" --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+  assert_exit "astra effort: $BAD_EFFORT は拒否" 2
+  assert_contains "astra effort: $BAD_EFFORT の許容値を表示" "high または max"
+done
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort max --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra effort: route 推奨との不一致は拒否" 2
+assert_contains "astra effort: route 推奨との不一致理由" "推奨と一致しない"
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort max --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_max
+assert_exit "astra effort: route 推奨 max なら通過" 0
+
+run "$BIN" --dry-run --force --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra: --force(cooldown 用)ではゲートを迂回できない" 2
+assert_contains "astra: --force でも承認を求める" "delegate-route"
+
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra: --force-astra で強行できる" 0
+assert_contains "astra: 強行時は警告を出す" "--force-astra で強行"
+assert_contains "astra: 強行時は note への記録を促す" "note に理由"
+
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT_OTHER" --route-id rt_no_sha
+assert_exit "astra: --force-astra は sha・effort・route 不備を迂回" 0
+assert_contains "astra: --force-astra + medium は警告つきで通過" "--force-astra で強行"
+assert_contains "astra: --force-astra + medium でも effort を明示" 'model_reasoning_effort=\"medium\"'
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --cd "$GITDIR" --prompt-file "$PROMPT_OTHER"
+assert_exit "astra: --force-astra でも effort 未指定は拒否" 2
+assert_contains "astra: effort 未指定は既存の必須条件を維持" "codex は --effort 必須"
+
+run "$BIN" --dry-run --force --cli codex --mode write --model gpt-6-astra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra: --force では effort 制限を迂回できない" 2
+assert_contains "astra: --force の effort 拒否理由" "high または max"
+
+# cooldown 中でも、承認済み route + --force なら通る(ゲートは route、cooldown は --force)
+"$BIN" --set-cooldown codex 30m "astra gate test" >/dev/null 2>&1
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra: cooldown 中は承認済み route でも止まる" 2
+assert_contains "astra: 止まる理由は cooldown" "cooldown 中"
+run "$BIN" --dry-run --force --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra: cooldown + 承認済み route + --force で通過" 0
+"$BIN" --clear-cooldown codex >/dev/null 2>&1
+
+# Astra 以外のモデルでは --force-astra は無害
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra: 他モデルで --force-astra は無害" 0
+assert_not_contains "astra: 他モデルでは強行警告を出さない" "--force-astra で強行"
+
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra ゲート: Astra 以外は route 不要" 0
+
+# resume でもゲートは効く
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --resume 0123abcd-0000-7000-8000-000000000000
+assert_exit "astra: resume でもゲートは効く" 2
+
+# Astra 承認は成功した新規実行 1 回で消費し、同じ session の resume だけ許可する
+FAKE_ASTRA_BIN="$TMP/fake-astra-bin"; mkdir -p "$FAKE_ASTRA_BIN"
+printf '#!/bin/bash\necho "session id: abc12345-0000-7000-8000-000000000000"\n' > "$FAKE_ASTRA_BIN/codex"
+chmod +x "$FAKE_ASTRA_BIN/codex"
+RUNHOME_ASTRA="$TMP/runhome-astra"; mkdir -p "$RUNHOME_ASTRA"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_consume
+assert_exit "astra 消費: 1 回目の新規実行は成功" 0
+LOGGED_INSTRUCTION_SHA="$(jq -r 'select(.route_id=="rt_consume") | .instruction_sha256' "$DELEGATE_LOG_DIR/runs.jsonl")"
+[ "$LOGGED_INSTRUCTION_SHA" = "$PROMPT_SHA" ] && ok \
+  || { OUT="$LOGGED_INSTRUCTION_SHA"; ng "run: runs.jsonl に instruction_sha256 を記録"; }
+{
+  printf '%s\n' '壊れた runs 行'
+  cat "$DELEGATE_LOG_DIR/runs.jsonl"
+} > "$DELEGATE_LOG_DIR/runs.jsonl.tmp"
+mv "$DELEGATE_LOG_DIR/runs.jsonl.tmp" "$DELEGATE_LOG_DIR/runs.jsonl"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_consume
+assert_exit "astra 消費: 壊れた行の後でも同一 route_id の 2 回目新規実行を拒否" 2
+assert_contains "astra 消費: 使用済み理由を表示" "この指示書内容での Astra 承認は使用済み"
+assert_contains "astra 消費: 同一内容の再実行手順" "--instruction からやり直して新しい route_id"
+assert_contains "astra 消費: 修正継続の手順" "修正の継続は --resume"
+assert_contains "astra 消費: 改稿後の再承認手順" "instruction_changed:true"
+
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_consume --resume abc12345-0000-7000-8000-000000000000
+assert_exit "astra resume: 壊れた行の後でも一致する session_id は通過" 0
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_consume --resume fff12345-0000-7000-8000-000000000000
+assert_exit "astra resume: 不一致 session_id は拒否" 2
+assert_contains "astra resume: 不一致理由を表示" "session_id と一致しない"
+
+# 同じ route_id でも、改稿後の新しい sha で再承認された最新ラウンドなら新規実行できる
+printf '%s\n' \
+  "{\"route_id\":\"rt_consume\",\"round\":2,\"gate\":\"confirmed\",\"recommend\":{\"model\":\"gpt-6-astra\",\"effort\":\"high\"},\"astra_approved\":true,\"instruction_sha256\":\"$PROMPT_REVISED_SHA\",\"open\":[]}" \
+  >> "$ROUTE_JSONL"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT_REVISED" --route-id rt_consume
+assert_exit "astra 消費: 改稿・同一 route_id・新しい sha の再承認後は新規実行できる" 0
+REVISED_LOGGED_SHA="$(jq -Rr 'fromjson? | select(type=="object" and .route_id=="rt_consume") | .instruction_sha256' \
+  "$DELEGATE_LOG_DIR/runs.jsonl" | tail -1)"
+[ "$REVISED_LOGGED_SHA" = "$PROMPT_REVISED_SHA" ] && ok \
+  || { OUT="$REVISED_LOGGED_SHA"; ng "run: 改稿後の instruction_sha256 を記録"; }
+
+# instruction_sha256 の無い旧成功 run は安全側で同じ内容の消費済みとみなす
+printf '%s\n' \
+  '{"run_id":"run_legacy_success","route_id":"rt_legacy","exit_code":0,"resume_of":null,"session_id":"legacy-session"}' \
+  >> "$DELEGATE_LOG_DIR/runs.jsonl"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_legacy
+assert_exit "astra 消費: instruction_sha256 の無い旧成功 run は使用済み" 2
+assert_contains "astra 消費: 旧成功 run も使用済み理由を表示" "この指示書内容での Astra 承認は使用済み"
+
+# 以降の非ゲート系テストは jq で runs.jsonl を直接読むため、堅牢性 fixture の壊れた行を除く
+sed '/^壊れた runs 行$/d' "$DELEGATE_LOG_DIR/runs.jsonl" > "$DELEGATE_LOG_DIR/runs.jsonl.tmp"
+mv "$DELEGATE_LOG_DIR/runs.jsonl.tmp" "$DELEGATE_LOG_DIR/runs.jsonl"
+
+printf '#!/bin/bash\nexit 1\n' > "$FAKE_ASTRA_BIN/codex"; chmod +x "$FAKE_ASTRA_BIN/codex"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_fail_retry
+assert_exit "astra 消費: 失敗 run は exit 1" 1
+printf '#!/bin/bash\necho "session id: def12345-0000-7000-8000-000000000000"\n' > "$FAKE_ASTRA_BIN/codex"; chmod +x "$FAKE_ASTRA_BIN/codex"
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_fail_retry
+assert_exit "astra 消費: exit_code!=0 の run 後は新規実行できる" 0
+
+run env HOME="$RUNHOME_ASTRA" PATH="$FAKE_ASTRA_BIN:$PATH" "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --effort low \
+  --cd "$GITDIR" --prompt-file "$PROMPT_OTHER" --route-id rt_consume
+assert_exit "astra: --force-astra は承認消費・sha・effort をまとめて迂回" 0
+
+# ── run 実行: runs.jsonl の route_id と指示書の退避(fake CLI で実行を伴う検証)──
+FAKEAGY="$TMP/fake-agy"; printf '#!/bin/bash\necho fake-agy-ok\n' > "$FAKEAGY"; chmod +x "$FAKEAGY"
+RUNHOME="$TMP/runhome"; mkdir -p "$RUNHOME"
+run env HOME="$RUNHOME" AGY_BIN="$FAKEAGY" "$BIN" --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" \
+  --cd "$NONGIT" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "run: fake agy の実行に成功" 0
+RID="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+[ -n "$RID" ] && ok || ng "run: run_id を出力する"
+LOGGED_ROUTE="$(jq -r --arg r "$RID" 'select(.run_id==$r) | .route_id' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_ROUTE" = "rt_ok" ] && ok || ng "run: runs.jsonl に route_id を記録(実際: $LOGGED_ROUTE)"
+LOGGED_AGY_SHA="$(jq -r --arg r "$RID" 'select(.run_id==$r) | .instruction_sha256' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_AGY_SHA" = "$PROMPT_SHA" ] && ok \
+  || { OUT="$LOGGED_AGY_SHA"; ng "run: Astra 以外も instruction_sha256 を記録"; }
+if [ -f "$DELEGATE_LOG_DIR/instructions/$RID.md" ] \
+   && cmp -s "$PROMPT" "$DELEGATE_LOG_DIR/instructions/$RID.md"; then ok
+else OUT="$(ls -R "$DELEGATE_LOG_DIR" 2>&1)"; ng "run: 指示書を instructions/<run_id>.md へ退避"; fi
+
+# route-id 未指定なら runs.jsonl の route_id は null
+run env HOME="$RUNHOME" AGY_BIN="$FAKEAGY" "$BIN" --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" \
+  --cd "$NONGIT" --prompt-file "$PROMPT"
+RID2="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+LOGGED_ROUTE2="$(jq -r --arg r "$RID2" 'select(.run_id==$r) | .route_id' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_ROUTE2" = "null" ] && ok || ng "run: route-id 未指定なら null(実際: $LOGGED_ROUTE2)"
+LOGGED_FORCED="$(jq -r --arg r "$RID2" 'select(.run_id==$r) | .astra_forced' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_FORCED" = "false" ] && ok || ng "run: 強行していなければ astra_forced=false(実際: $LOGGED_FORCED)"
+
+# --force-astra で強行した実行は runs.jsonl に astra_forced:true を残す(実 codex は呼ばない)
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+printf '#!/bin/bash\necho fake-codex-ok\n' > "$FAKEBIN/codex"; chmod +x "$FAKEBIN/codex"
+run env HOME="$RUNHOME" PATH="$FAKEBIN:$PATH" "$BIN" --cli codex --mode write --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT" --force-astra
+RID3="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+LOGGED_FORCED3="$(jq -r --arg r "$RID3" 'select(.run_id==$r) | .astra_forced' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_FORCED3" = "true" ] && ok || ng "run: 強行実行は astra_forced=true(実際: $LOGGED_FORCED3)"
+
+# dry-run は退避しない
+BEFORE_N="$(ls "$DELEGATE_LOG_DIR/instructions" 2>/dev/null | grep -c . | tr -d ' ')"
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+AFTER_N="$(ls "$DELEGATE_LOG_DIR/instructions" 2>/dev/null | grep -c . | tr -d ' ')"
+[ "$BEFORE_N" = "$AFTER_N" ] && ok || ng "run: dry-run では指示書を退避しない($BEFORE_N → $AFTER_N)"
 
 echo
 echo "PASS: $PASS / FAIL: $FAIL"

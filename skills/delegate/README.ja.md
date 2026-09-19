@@ -24,6 +24,7 @@ Claude Code を**司令塔**にして、外部 AI CLI(OpenAI Codex / xAI Grok / 
 | 成果物の受け入れ | 委任先の「完了しました」を信用しがち | マニフェスト照合・全 diff レビュー・ベースライン比較が必須工程 |
 | 設計判断 | 外部AIに丸投げされがち | 詳細設計は「ドラフト」まで。最終設計・製品判断・コミットは Claude Code |
 | limit・クォータ切れ | 毎回「使ってみる→失敗→代替」 | cooldown を記録し、実行前に拒否して代替へ直行 |
+| モデルティアの選定 | 司令塔の感覚。上位モデルが事実上のデフォルトになり週次枠を使い切る | 独立した判定者の信号+`bin/delegate-route` の決定式。最上位モデルは週予算つきで毎回人間が承認し、内容・ティアの未確定点は確定するまで人間に質問 |
 | 振り返り | 記録なし | 全委任を JSONL に記録し、10件ごとにルーティングを見直し |
 
 ## セットアップ
@@ -62,6 +63,8 @@ DELEGATE_LOG_DIR=/path/to/your/logs   # 省略時: ~/.claude/logs/delegate
 - `delegation-log.jsonl` — 委任の評価ログ(採否・ルーティング判定)
 - `runs.jsonl` / `runs/*.log` — `delegate-run` の実行記録と生ログ
 - `cooldowns.json` — limit 中の CLI の記録(セッション・プロジェクト横断で共有)
+- `route-decisions.jsonl` / `route-series.json` — `delegate-route` の判定履歴(質問と回答を含む)と連作の保持
+- `instructions/<run_id>.md` — `delegate-run` が退避した指示書(監査・バックテストの材料)
 
 ログには委任したタスク内容が含まれるため、**リポジトリにはコミットしない**設計です(`.gitignore` 済み)。
 
@@ -96,7 +99,9 @@ skills/delegate/
 ├── templates.md      # 実装指示書・詳細設計ドラフト依頼・独立レビュー依頼
 ├── lessons.md        # 事故例・実測記録・ログ見直しの昇格条件
 ├── bin/
-│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown)
+│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown・Astra ゲート)
+│   ├── delegate-route         # モデルティア判定ゲート(決定式・Astra 週予算・人間への質問の生成。LLM は呼ばない)
+│   ├── delegate-route-tests.sh
 │   └── delegate-run-tests.sh  # 既知事故を変換した dry-run テスト
 └── .env.example
 ```
@@ -117,6 +122,6 @@ skills/delegate/
 
 ## ネットワークアクセスと破壊的操作
 
-- スキル自体(ドキュメント+`delegate-run`)は外部ネットワークにアクセスしません
+- スキル自体(ドキュメント+`delegate-run` / `delegate-route`)は外部ネットワークにアクセスしません
 - ただし**委任を実行すると、各 CLI が読んだコード・指示書は各社の API に送信されます**。`SKILL.md`「秘密情報・外部送信ルール」で `.env`・秘密鍵・顧客データを読ませない規律を定めています([SECURITY.md](../../SECURITY.md))
 - `delegate-run` はコミット・プッシュ・ファイル削除を行いません。書き込み委任は各 CLI の sandbox(workspace-write 等)に限定し、bypass 系フラグの生成を拒否します

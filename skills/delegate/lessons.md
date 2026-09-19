@@ -39,6 +39,14 @@
 - **codex 側の別スキル(`delegate-codex`)が exec 内で干渉する(2026-09-02 実測、2026-09-05 再現)**: Codex を司令塔にする用途の `delegate-codex` スキルが `codex exec` 内でも読み込まれ、リポジトリ外の委任ログ(`delegate-log`)の lock 取得失敗や無関係メモの読み込みに予算を消費して実装未到達(変更ゼロ)になった。2026-09-05 は実装自体は完了したが lock エラーを再現 → 実装指示書の末尾定型にリポジトリ外の読み込み・実行を禁止する範囲ガードを入れる(`templates.md`「1. 実装指示書」)。最終レポートに「委任評価ログ未記録」「lock を取得できない」等の記述があっても、それは委任先環境の話であり成果物の欠陥ではない(司令塔側のログ記録には影響しない)
 - **セッション継続を理由に sol/max を小変更へ使わない(2026-08-19 実測4件、`過剰`)**: 採用済み UI への小さな変更依頼を、文脈があるからと同一 sol/max セッションの resume で続けると、1件あたり luna / terra の10倍前後のトークンを消費する。文脈が必要なら指示書に現状と変更点を書いて新規セッションを luna / terra で開く。新規571件で codex 実装費用の76%が sol に集中した主因の一つ
 
+### 2026-09 / 委任ログ見直し(1721 件、v0.26.0)— Astra の使い過ぎ
+
+- **上位モデルが事実上のデフォルトになる逸脱は、司令塔の自己採点では検出できない(2026-09-05〜09-19 実測)**: `gpt-6-astra` が 182 件・18.1 億トークンで codex 消費の約 75%。週次枠を 2 週間で 4 回使い切った。モデル表は「難所・重要のみ」だったが、Astra 実装 163 件中 note に選定根拠があるのは 7 件、表に無い `astra/medium`・`low` が 50 件、move-only・歴史化など挙動不変の作業に 4.2 億トークン。1 リポジトリの連作(86 件・14.7 億)では Terra が 0 件になっていた(8 月は同リポジトリで Terra 48 件・中央値 220 万)。この間 `routing_verdict:"過剰"` は 589 件中 2 件 → 規約の文言ではなく**機械的なゲート**で担保する: `delegate-route`(週予算・人間承認)と `delegate-run` の Astra 拒否
+- **クォータの減り方はトークン数に比例しない(推定)**: `~/.codex/sessions/**/rollout-*.jsonl` の `token_count` イベントにある `rate_limits.primary.used_percent`(週次枠)から、Astra は同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍を消費(週次枠 1% あたり Astra 約 110 万・Terra 約 340 万・Sol 約 570 万トークン)。セッションの並走で増分が混ざるため絶対値は ±30〜50% の推定。週予算 8,000 万トークン / 8 件はここから置いた初期値で、見直しのたびに実測し直す
+- **品質は良いので「禁止」ではなく「予算」**: Astra 実装は採用率 98%・`cause:"model"` 5.5%(Terra high 21%・medium 10%)。一方 `cause:"instruction"` が 20% と高く、大きいタスクを指示書の未確定点ごと渡していた兆候 → 委任前に内容の未確定点を人間へ質問して潰す(`SKILL.md`「ティア判定と確定ループ」)
+- **delegate-run 自身を変更する委任は、作業ツリーの delegate-run で走らせない(2026-09-19 実測)**: `~/.claude/skills/delegate` はこのリポジトリへの symlink なので、委任先が `bin/delegate-run` を書き換えると、走行中のラッパー(bash はスクリプトを逐次読みする)が途中から別の内容を読み、委任完了後に構文エラーで落ちた。codex 本体の作業は無事だったが、後処理(runs.jsonl の記録・トークン抽出・指示書の退避)が丸ごと欠落 → このスキルの `bin/` を変更対象に含む委任では、`git show HEAD:skills/delegate/bin/delegate-run > <scratchpad>/delegate-run-stable` のコピーをラッパーに使う(`.env` を読めないので `DELEGATE_LOG_DIR` 等は環境変数で渡す)。欠落した run は codex のログから session_id を拾い、`--extract-tokens` で補完して委任ログに記録する
+- **指示書の保全が未実装だった**: 0.24.0 で計画した `$LOG_DIR/instructions/<run_id>.md` への退避が入っておらず、現存 1 件。過去ログでのバックテストができなかった → 0.26.0 で `delegate-run` に実装
+
 ## Grok
 
 - 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する(2026-07-11 クレジット購入後に read-only スモークで疎通確認済み: exit 0・2秒・sessionId 取得。同日実測でモデルラインナップが grok-4.20/4.3/4.5 系へ変わり、`--output-format json` の応答構造も `{text, stopReason, sessionId, requestId}` に変化 — `type` フィールド無し。delegate-run の sessionId 抽出はそのまま動作)
@@ -122,6 +130,29 @@ jq -s '{human_rework: [.[] | select(.rework_of != null)] | length,
 
 - この率が見直しのたびに上がる場合は、モデルやルーティングではなく**司令塔レビューの強化**を検討する(独立レビューの適用拡大、実機・実測確認の完了条件化、指示書の完了条件の数値化)
 - `rework_of` は 2026-07-14(138件時点)導入。それ以前のエントリは確実に人間差し戻しと判別できた6件のみ遡及タグ付けしているため、率の時系列比較は導入以降を基準にする
+
+### ティア判定(delegate-route)の見直し指標
+
+`route-decisions.jsonl`(ラウンドごと 1 行)と委任ログを突き合わせる。質問数に上限は置かない(ユーザー方針 2026-09-19)ので、合否ではなく**質問の発生源を断つ**ために見る:
+
+```bash
+LOG_DIR="${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}"
+"$SKILL_DIR/bin/delegate-route" --budget    # Astra 直近 7 日の消費
+# 委任(route)あたりのラウンド数と、質問が出た軸の内訳
+jq -s 'group_by(.route_id) | map({rounds: (map(.round)|max), axes: (map(.open[]?.reason)|unique)}) |
+  {routes: length, rounds_avg: ((map(.rounds)|add)/length*100|round/100),
+   axes: (map(.axes[])|group_by(.)|map({axis: .[0], n: length})|sort_by(-.n))}' "$LOG_DIR/route-decisions.jsonl"
+# 人間の回答が判定者の信号と食い違った軸(noul を 0.5 で二値化して比較)
+jq -s 'map(select(.human_facts != null)) | group_by(.route_id) | map(last) |
+  map(. as $r | ($r.human_facts|to_entries[]|select(.value|type=="boolean")) |
+      {axis: .key, agree: (((($r.signals[.key] // 0.5) >= 0.5)) == .value)}) |
+  group_by(.axis) | map({axis: .[0].axis, n: length, agree: (map(select(.agree))|length)})' "$LOG_DIR/route-decisions.jsonl"
+```
+
+- 同じ内容軸(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision`)に質問が 3 件以上偏ったら、`templates.md`「1. 実装指示書」の必須項目へ昇格して質問の発生源を断つ
+- 人間回答との一致率が高い軸は確定域の閾値(0.2 / 0.8、confidence 0.9)を緩める根拠、低い軸は判定依頼書(`templates.md`「4.」)の質問文を直す根拠。閾値の変更は「同じ軸で 3 件以上」の規律に従う
+- 効果測定: 質問を経た委任と経ない委任の `cause:"instruction"` 率、推奨どおり下位ティアで走らせた委任の `cause:"model"` 率(基準: Terra medium 10%・high 21%)、`--force-astra` による Astra 強行の件数(`runs.jsonl` の `astra_forced`)
+- 判定者の確率は較正されていない(Claude サブエージェント)。Jev 等へ差し替えたら、差し替え前後で一致率を比較する
 
 ### 司令塔スコアカード(見直しごとに算出・追記)
 

@@ -2,9 +2,9 @@
 
 役割: **通常実装のデフォルト委任先**。コード密着の read-only 相談・詳細設計ドラフトのレビューにも使う。**Web 調査には使わない**(委任時は web_search を切って運用する。Web が要るタスクは Grok / Antigravity へ)。
 
-## モデル表(GPT-6 Astra + GPT-5.6 混成 / 2026-09-05 改定)
+## モデル表(GPT-5.6 主系統 + GPT-6 Astra は「ここ一番」限定 / 2026-09-19 改定)
 
-通常実装は GPT-5.6 ファミリ(Terra / Luna)、難所・重要・高リスクは GPT-6 Astra を主系統とする。根拠: 公式モデルページ https://learn.chatgpt.com/docs/models (旧 https://developers.openai.com/codex/models から 308 リダイレクト)は Astra を「Our most capable model for complex work across code, apps, and research」と位置づけ、複数ステップ・複数ツールにまたがる持続的な推論と判断を要する end-to-end のワークフロー向けとしている。Sol は「ambiguous, difficult, or high-value」、Terra は日常作業の自然な起点、Luna は成功条件が明確な高頻度作業という位置づけを維持している。
+通常実装は GPT-5.6 ファミリ(Terra / Luna)、難所は Sol を主系統とし、GPT-6 Astra は週予算つきの「ここ一番」に限る(下記「Astra の使用条件と週予算」)。各モデルの位置づけの根拠: 公式モデルページ https://learn.chatgpt.com/docs/models (旧 https://developers.openai.com/codex/models から 308 リダイレクト)は Astra を「Our most capable model for complex work across code, apps, and research」と位置づけ、複数ステップ・複数ツールにまたがる持続的な推論と判断を要する end-to-end のワークフロー向けとしている。Sol は「ambiguous, difficult, or high-value」、Terra は日常作業の自然な起点、Luna は成功条件が明確な高頻度作業という位置づけを維持している。
 
 手元の `~/.codex/models_cache.json` (`fetched_at`: 2026-09-04 / client 0.153.0)で Astra・Sol・Terra・Luna が `visibility:"list"` に含まれることを確認済み。codex 0.153.2 で `codex exec --sandbox read-only -m gpt-6-astra -c 'model_reasoning_effort="low"'` の疎通を実測済み(exit 0、リポジトリのファイルも実読)。Astra の supported effort は `low` / `medium` / `high` / `xhigh` / `max` / `ultra`、default は `medium`。
 
@@ -13,23 +13,33 @@
 | 機械的な作業 | リネーム、定型コード追加、雛形作成、仕様が完全に固定されたテスト追加 | `-m gpt-5.6-luna -c 'model_reasoning_effort="medium"'` |
 | 標準的な実装 | 通常の機能追加・障害修正 | `-m gpt-5.6-terra -c 'model_reasoning_effort="medium"'` |
 | 横断的な標準実装 | 複数レイヤー、状態遷移、DB移行、並行処理を伴う変更 | `-m gpt-5.6-terra -c 'model_reasoning_effort="high"'` |
-| 難所 | 複雑なリファクタ、原因不明の障害、高い退行リスク | `-m gpt-6-astra -c 'model_reasoning_effort="high"'` |
-| 重要・高リスク | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ・退行リスク大。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'` |
+| 難所 | 複雑なリファクタ、原因不明の障害、高い退行リスク | `-m gpt-5.6-sol -c 'model_reasoning_effort="high"'` |
+| 最難関(ここ一番) | レビュー可能な単位へ分割できない難所。または Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格 | `-m gpt-6-astra -c 'model_reasoning_effort="high"'`(人間承認+週予算) |
+| 重要・高リスク(ここ一番) | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'`(人間承認+週予算。予算超過時は `gpt-5.6-sol / high`) |
 
 - 迷ったら `gpt-5.6-terra / medium`。このスキルでは Claude Code が設計を確定してから実装を渡すため、標準実装で Astra をデフォルトにしない
 - Luna は「何を変更するか」「正解が何か」が明確な作業に限る。仕様解釈・設計判断・複数案の比較が必要なら Terra へ上げる
 - Terra は通常実装の主力。複数ファイルという理由だけで Astra に上げず、曖昧さ・影響範囲・退行リスクで判断する
-- Sol は Astra が使えない場合のフォールバックと、設計のセカンドオピニオンなど深い read-only 相談の主力
+- Sol は難所の主系統。Astra の予算超過・不承認時の代替、設計のセカンドオピニオンなど深い read-only 相談の主力でもある
 - セッション継続(文脈の再利用)を理由に、小変更を sol/max の resume で続けない。小変更は現状と変更点を指示書に書き、新規セッションを luna / terra で開く(`../lessons.md`「Codex」)
-- Astra は難所と重要・高リスクの実装を担う。Astra を頻繁に使う状態は、モデル不足ではなくタスク分割または指示書の不足を疑う
-- **「重要・高リスク」ティア(gpt-6-astra / max)は難易度でなく重要度の軸**(ユーザー方針 2026-07-20)。司令塔が「自分でやった方が早い」と感じる重要対応こそここへ委任し、最深の推論を割いて司令塔はレビューに専念する(`../SKILL.md`「委任可否ゲート」)。`max` は TUI `/model` で対象モデルに表示され利用可能なことを確認してから使う(下記「max / ultra」)。モデルは利用できるが effort 指定が失敗する場合は `xhigh` → `high`(難所ティア)へ落とす。委任ログで Astra/max の採用率・手戻り・コストを評価して定着可否を判断する
-- **Astra canary 開始(2026-09-05)**: Astra ティア(難所・重要・高リスク)の委任は当面、委任ログの `note` に `canary` と記録し、`../lessons.md`「ログの見直しと昇格条件」に従って昇格・差し戻しを判断する。Astra が使えない・不適と判明した場合は、同じ effort の `gpt-5.6-sol` へ明示的にフォールバックする(自動では行わない)
+- Astra を使いたくなる状態が続くのは、モデル不足ではなくタスク分割または指示書の不足を疑う(move-only・歴史化・置換バッチなど挙動不変の作業は、大きくても Terra / Luna)
+- **「重要・高リスク」ティア(gpt-6-astra / max)は難易度でなく重要度の軸**(ユーザー方針 2026-07-20)。司令塔が「自分でやった方が早い」と感じる重要対応こそここへ委任し、最深の推論を割いて司令塔はレビューに専念する(`../SKILL.md`「委任可否ゲート」)。`max` は TUI `/model` で対象モデルに表示され利用可能なことを確認してから使う(下記「max / ultra」)。モデルは利用できるが effort 指定が失敗する場合は `xhigh` → `high`(難所ティア)へ落とす。予算超過で Astra を使えない重要対応は `gpt-5.6-sol / high` + 独立レビューで担保する
+- **Astra canary 終了(2026-09-05〜09-19、182 件)**: 品質は良好(実装 163 件で採用率 98%・`cause:"model"` 5.5%。同期間の Terra high 21%・medium 10%)だが、週次クォータの消費が同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍(`~/.codex/sessions` の rate_limits からの推定)で、2 週間に週次枠を 4 回使い切った。以後は下記の使用条件と週予算で運用する。`note` の `canary` 記録は不要。Astra が使えない・不適な場合は同じ effort の `gpt-5.6-sol` へ明示的にフォールバックする(自動では行わない)
 - 世代間の effort に正確な対応関係を仮定しない。GPT-5.5 と GPT-5.6 は公式に「no exact mapping」と明記されており、GPT-5.6 と GPT-6 の effort にも同値性を仮定しない。旧設定の `high` / `xhigh` をそのまま移植せず、公式方針どおり必要な結果が出る最小の effort から試して委任ログで評価する。フォールバックの「同じ effort」は指定値の維持であり、推論深度やコストの同値性を意味しない
 - **GPT-5.6 canary 完了(2026-07-10〜07-13)**: **GPT-5.6 全ティア昇格確定**。119件見直し(2026-07-13)時点で Terra は実装64件中62採用(非採用は capacity 失敗1と設計起因の一部採用1のみ)、Sol 3/3、Luna 3/3(仕様固定の機械的 UI 変更を3件とも一発で仕様どおり実装 — Luna の想定用途どおり)。以後の GPT-5.6 ティアは canary の note 記録なしの通常運用とし、モデル表の見直しは `../lessons.md`「ログの見直しと昇格条件」の更新条件(同じ組で3件以上の偏り)に従う
 
+### Astra の使用条件と週予算(2026-09-19、ユーザー方針)
+
+- **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(Sol / high が上限)
+- **effort は `high` か `max` のみ**。`low` / `medium` の Astra は使わない(その用途は Terra で足りる。canary 期間に `astra/medium` 37 件で 6.9 億トークンを消費した)
+- **週予算: 直近 7 日で 8,000 万トークンまたは 8 件**(どちらか早い方。`.env` の `ASTRA_WEEKLY_TOKEN_CAP` / `ASTRA_WEEKLY_COUNT_CAP`)。残量は `delegate-route --budget`
+- **毎回、人間の承認を取る**。`delegate-route` が Astra を推奨しても、承認の質問(今週の消費と代替案つき)を経るまで確定しない。`delegate-run` は `-m gpt-6-astra` を、人間承認済みの `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
+- 予算超過時の既定は `gpt-5.6-sol / high`。「超過を承知で使う」は人間だけが選べる
+- 手順は `../SKILL.md`「ティア判定と確定ループ」
+
 ### GPT-6 Astra の max / ultra(例外扱い)
 
-- `gpt-6-astra / max` は最大深度の推論として次の2用途で使う(いずれも単一エージェントに深い推論時間を与える): (1) レビュー可能な単位へ分割できず、深さが速度・クォータより重要な**最難関**(難易度の軸)、(2) モデル表の**重要・高リスク**ティア(重要度の軸。ユーザー方針 2026-07-20)。速度・クォータより深さ/確実性を優先する点が共通。通常の標準実装(terra)には使わない
+- `gpt-6-astra / max` は最大深度の推論として次の2用途で使う(いずれも単一エージェントに深い推論時間を与える): (1) レビュー可能な単位へ分割できず、深さが速度・クォータより重要な**最難関**(難易度の軸)、(2) モデル表の**重要・高リスク**ティア(重要度の軸。ユーザー方針 2026-07-20)。いずれも上記「Astra の使用条件と週予算」の範囲内で使う。通常の標準実装(terra)には使わない
 - `ultra` は Codex 内部でサブエージェントを使うモード(公式: 「uses subagents to accelerate complex work」)。**通常の書き込み委任には使わない** — どの内部エージェントが何を判断したかが不透明になり、Claude Code 側のマニフェスト照合・原因分析・委任ログ評価が弱くなる(このスキル側に既にルーティング・worktree分離のオーケストレーションがあり二重化する)
 - 使うとしても read-only の複数観点レビュー・大規模調査に限定する
 - `max` / `ultra` は TUI の `/model` で対象モデルに表示され、実際に利用可能であることを確認してから使う
@@ -103,7 +113,7 @@ codex exec \
 
 - 質問ファイルの締めは相談用に差し替える: 「確認や質問は不要です。リポジトリの読み取り・検索は積極的に行ってください(禁止はファイルの作成・変更のみ)。具体的な提案・修正案・コード例まで自主的に出力してください。」(禁止文言だけ書くと read-only を過解釈して repo 未読のまま回答される — 2026-07-12 実測)
 - ティアの目安: 軽い相談(仕様確認・小さな疑問)は `gpt-5.6-luna / medium` でクォータを節約。標準的な相談は `gpt-5.6-terra / medium`、設計のセカンドオピニオンなど深い相談は `gpt-5.6-sol / high`(effort は低めから試す)
-- 詳細設計ドラフト関連の目安: 設計済み方針の実装可能性確認は `gpt-5.6-terra / high`、複雑な設計の落とし穴・移行・並行処理のレビューは `gpt-5.6-sol / high`、分割不能な最難関の技術設計レビューのみ `gpt-6-astra / max`。大規模読解を含む第一ドラフトは Antigravity に置き、Codex は「実装担当視点で詳細設計をレビューする」役割に限る(最終設計は確定させない)
+- 詳細設計ドラフト関連の目安: 設計済み方針の実装可能性確認は `gpt-5.6-terra / high`、複雑な設計の落とし穴・移行・並行処理のレビューは `gpt-5.6-sol / high`、分割不能な最難関の技術設計レビューも `gpt-5.6-sol / high` を上限とする(Astra は相談・レビューに使わない)。大規模読解を含む第一ドラフトは Antigravity に置き、Codex は「実装担当視点で詳細設計をレビューする」役割に限る(最終設計は確定させない)
 - **Web 調査が目的の相談は codex に投げない**(web_search を切って使うため)
 
 ## resume(継続・修正指示)

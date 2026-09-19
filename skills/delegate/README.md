@@ -14,7 +14,7 @@ Turns Claude Code into an **orchestrator** which safely delegates implementation
 - Japanese writing and proofreading → **Antigravity (Gemini Flash)**
 - cheap pre-design code reading → **Claude subagents**
 
-Every delegation goes through an auditable loop: baseline measurement → written instruction → sandboxed execution via `bin/delegate-run` → file-manifest cross-check → full diff review → one-line JSONL log entry. Rate-limited CLIs are recorded as cooldowns and rejected before execution instead of being retried every time.
+Every delegation goes through an auditable loop: baseline measurement → written instruction → sandboxed execution via `bin/delegate-run` → file-manifest cross-check → full diff review → one-line JSONL log entry. Rate-limited CLIs are recorded as cooldowns and rejected before execution instead of being retried every time. Before a Codex delegation, `bin/delegate-route` turns an independent judge's typed signals into a recommended model tier, enforces a weekly budget on the top-tier model (each use needs explicit human approval), and keeps asking the human until both the change itself and the tier are settled.
 
 ## Setup
 
@@ -48,7 +48,7 @@ Configurable via `.env` (precedence: process env > `.env` > default `~/.claude/l
 DELEGATE_LOG_DIR=/path/to/your/logs
 ```
 
-Logs (`delegation-log.jsonl`, `runs.jsonl`, `cooldowns.json`) contain descriptions of what you delegated, so they are intentionally kept out of the repository.
+Logs (`delegation-log.jsonl`, `runs.jsonl`, `cooldowns.json`, `route-decisions.jsonl`, archived instructions) contain descriptions of what you delegated, so they are intentionally kept out of the repository.
 
 ## Requirements
 
@@ -59,6 +59,6 @@ Logs (`delegation-log.jsonl`, `runs.jsonl`, `cooldowns.json`) contain descriptio
 
 ## Network access & destructive operations
 
-- The skill itself (markdown + `delegate-run`) makes no network calls
+- The skill itself (markdown + `delegate-run` / `delegate-route`) makes no network calls
 - **Running a delegation sends the code each worker CLI reads to that vendor's API** — the protocol includes explicit rules to keep `.env` files, secrets, and customer data out of delegated context (see [SECURITY.md](../../SECURITY.md))
 - `delegate-run` never commits, pushes, or deletes; write delegations are confined to each CLI's sandbox and dangerous bypass flags are rejected
