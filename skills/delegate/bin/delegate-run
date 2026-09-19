@@ -15,6 +15,9 @@
 #   delegate-run --cli grok --mode readonly --effort medium --cd /path/to/repo --prompt-file q.md
 #   共通: -o <file> / --out-report <file>: 最終レポートの保存先。codex はネイティブの -o、grok / agy はログのコピー
 #   resume/継続: --resume <SESSION_ID|CONVERSATION_UUID>(全フラグは自動で付け直される)
+#   判定の関連付け: --route-id <rt_…>(delegate-route の判定 ID。runs.jsonl に記録される)
+#     gpt-6-astra は gate=confirmed かつ astra_approved=true の --route-id が必須(強行は --force-astra)
+#     --force は cooldown の強行専用で、Astra ゲートには効かない
 #
 # cooldown(limit を踏んだ CLI を記録し、回復まで実行前に拒否する):
 #   一覧: --cooldowns / 記録: --set-cooldown <cli> <30m|2h> [理由] / 解除: --clear-cooldown <cli>
@@ -47,6 +50,15 @@ AGY_BIN="${ENV_AGY_BIN:-${AGY_BIN:-$HOME/.local/bin/agy}}"
 
 die() { echo "delegate-run: ERROR: $*" >&2; exit 2; }
 warn() { echo "delegate-run: WARN: $*" >&2; }
+sha256_file() {  # $1=ファイル → SHA-256(macOS/BSD を優先、GNU へフォールバック)
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
 
 # ── cooldown(limit を踏んだ CLI の記録と実行前ゲート)──
 COOLDOWN_FILE="$LOG_DIR/cooldowns.json"
@@ -448,7 +460,7 @@ esac
 
 # ── 引数 ──────────────────────────────────────────────
 CLI="" MODE="" MODEL="" EFFORT="" CD="" PROMPT_FILE="" REPORT="" RESUME="" LOG_FILE=""
-TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0
+TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0 FORCE_ASTRA=0 ROUTE_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli) CLI="${2:?}"; shift 2 ;;
@@ -459,11 +471,13 @@ while [ $# -gt 0 ]; do
     --prompt-file) PROMPT_FILE="${2:?}"; shift 2 ;;
     -o|--out-report) REPORT="${2:?}"; shift 2 ;;
     --resume) RESUME="${2:?}"; shift 2 ;;
+    --route-id) ROUTE_ID="${2:?}"; shift 2 ;;
     --log) LOG_FILE="${2:?}"; shift 2 ;;
     --timeout) TIMEOUT_MIN="${2:?}"; shift 2 ;;
     --max-turns) MAX_TURNS="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
+    --force-astra) FORCE_ASTRA=1; shift ;;
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
@@ -477,6 +491,7 @@ case "$CD" in /*) ;; *) die "--cd は絶対パスで指定する" ;; esac
 [ -d "$CD" ] || die "--cd が存在しない: $CD"
 [ -n "$PROMPT_FILE" ] || die "--prompt-file は必須"
 [ -s "$PROMPT_FILE" ] || die "prompt file が存在しないか空: $PROMPT_FILE"
+INSTRUCTION_SHA256="$(sha256_file "$PROMPT_FILE" || true)"
 
 # CLI 別の前提チェック(既知事故の予防)
 case "$CLI" in
@@ -508,6 +523,55 @@ if [ "$FORCE" -eq 0 ]; then
   if [ -n "$CD_UNTIL" ]; then
     CD_REASON="$(jq -r --arg c "$CLI" '.[$c].reason // ""' "$COOLDOWN_FILE" 2>/dev/null)"
     die "$CLI は cooldown 中(until $CD_UNTIL UTC。reason: $CD_REASON)。代替先は SKILL.md「委任先の limit と cooldown」の表を参照。解除済みと分かっている場合のみ --force で強行し、通ったら --clear-cooldown $CLI"
+  fi
+fi
+
+# ── Astra ゲート(高コストモデルは delegate-route の承認済み判定を必須にする)──
+ROUTE_DECISIONS="$LOG_DIR/route-decisions.jsonl"
+ASTRA_FORCED=false
+if [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ] && [ "$FORCE_ASTRA" -eq 1 ]; then
+  ASTRA_FORCED=true
+  warn "Astra ゲートを --force-astra で強行した(delegate-route の承認を経ていない)。委任ログの note に理由を書くこと"
+fi
+if [ "$FORCE_ASTRA" -eq 0 ] && [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ]; then
+  ASTRA_HINT="Astra(gpt-6-astra)は delegate-route の承認を先に通す: delegate-route --instruction <指示書> --kind 実装 --signals '{…}' → 質問に答えて --route-id <id> --human-facts '{\"astra_approved\":true}' で再判定 → gate=confirmed になった route_id を --route-id に渡す。承認済みと分かっている場合のみ --force-astra で強行する(--force は cooldown 専用でこのゲートには効かない)"
+  [ -n "$ROUTE_ID" ] || die "Astra の実行には --route-id が必要。$ASTRA_HINT"
+  [ -s "$ROUTE_DECISIONS" ] || die "route-decisions.jsonl が存在しないか空(--route-id $ROUTE_ID)。$ASTRA_HINT"
+  ROUTE_LINE="$(jq -Rrc --arg r "$ROUTE_ID" \
+    'fromjson? | select(type == "object" and .route_id == $r)' \
+    "$ROUTE_DECISIONS" 2>/dev/null | tail -1)"
+  [ -n "$ROUTE_LINE" ] || die "route-decisions.jsonl に route_id が無い: ${ROUTE_ID}。$ASTRA_HINT"
+  printf '%s' "$ROUTE_LINE" | jq -e '.gate=="confirmed" and .recommend.model=="gpt-6-astra" and .astra_approved==true' >/dev/null 2>&1 \
+    || die "route_id $ROUTE_ID は Astra 承認済みでない(gate=$(printf '%s' "$ROUTE_LINE" | jq -r '.gate') / recommend=$(printf '%s' "$ROUTE_LINE" | jq -r '.recommend.model') / astra_approved=$(printf '%s' "$ROUTE_LINE" | jq -r '.astra_approved'))。$ASTRA_HINT"
+
+  case "$EFFORT" in
+    high|max) ;;
+    *) die "Astra の --effort は high または max が必要(指定値: ${EFFORT:-未指定})。delegate-route の推奨 effort を指定する" ;;
+  esac
+  ROUTE_EFFORT="$(printf '%s' "$ROUTE_LINE" | jq -r '.recommend.effort // ""')"
+  [ "$EFFORT" = "$ROUTE_EFFORT" ] \
+    || die "Astra の effort が route の推奨と一致しない(指定: $EFFORT / route: ${ROUTE_EFFORT:-未記録})。delegate-route の推奨 effort を指定する"
+
+  ROUTE_INSTRUCTION_SHA256="$(printf '%s' "$ROUTE_LINE" | jq -r '.instruction_sha256 // ""')"
+  [ -n "$ROUTE_INSTRUCTION_SHA256" ] \
+    || die "route_id $ROUTE_ID に instruction_sha256 が無い。delegate-route で判定を取り直す"
+  [ -n "$INSTRUCTION_SHA256" ] || die "prompt file の SHA-256 を計算できない: $PROMPT_FILE"
+  [ "$INSTRUCTION_SHA256" = "$ROUTE_INSTRUCTION_SHA256" ] \
+    || die "prompt file と route の instruction_sha256 が一致しない。delegate-route で現在の指示書を判定し直す"
+
+  if [ -n "$RESUME" ]; then
+    [ -s "$RUNS_JSONL" ] \
+      || die "Astra の resume 元が runs.jsonl に無い。承認した委任の session_id を --resume に指定する"
+    jq -Rne --arg r "$ROUTE_ID" --arg s "$RESUME" \
+      '[inputs | fromjson? | select(type == "object" and .route_id == $r and .session_id == $s)] | length > 0' \
+      "$RUNS_JSONL" >/dev/null 2>&1 \
+      || die "Astra の --resume が同じ route_id の session_id と一致しない。承認した委任の session_id を指定する"
+  elif [ -s "$RUNS_JSONL" ] && jq -Rne --arg r "$ROUTE_ID" --arg sha "$INSTRUCTION_SHA256" \
+      '[inputs | fromjson? | select(type == "object" and .route_id == $r
+        and .exit_code == 0 and ((.resume_of // "") == "")
+        and (.instruction_sha256 == null or .instruction_sha256 == $sha))] | length > 0' \
+      "$RUNS_JSONL" >/dev/null 2>&1; then
+    die "この指示書内容での Astra 承認は使用済み。同じ内容でもう一度新規実行するなら delegate-route を --instruction からやり直して新しい route_id で承認を取る。修正の継続は --resume、指示書を直した場合は同じ route_id で instruction_changed:true の再承認でよい"
   fi
 fi
 
@@ -589,6 +653,15 @@ START_TS=$(date +%s)
 ) > "$LOG_FILE" 2>&1 < /dev/null
 EXIT_CODE=$?
 DURATION=$(( $(date +%s) - START_TS ))
+
+# ── 指示書の退避(成功・失敗とも。失敗しても本体の exit code は変えない)──
+if mkdir -p "$LOG_DIR/instructions" 2>/dev/null; then
+  cp "$PROMPT_FILE" "$LOG_DIR/instructions/$RUN_ID.md" 2>/dev/null \
+    || warn "指示書の退避に失敗: $LOG_DIR/instructions/$RUN_ID.md"
+else
+  warn "指示書の退避先を作成できない: $LOG_DIR/instructions"
+fi
+
 DIRTY_AFTER="$(git_dirty || echo "")"
 
 # ── 最終レポート(codex はネイティブの -o、grok / agy はログのコピー)──
@@ -634,12 +707,17 @@ jq -cn \
   --arg cli "$CLI" --arg mode "$MODE" --arg model "$MODEL" --arg effort "$EFFORT" \
   --arg commander "$COMMANDER" \
   --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
+  --arg instruction_sha256 "$INSTRUCTION_SHA256" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
+  --arg route_id "$ROUTE_ID" --argjson astra_forced "$ASTRA_FORCED" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
   --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" --arg cost_usd "$COST_USD" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
   '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,commander:$commander,cd:$cd,
-    prompt_file:$prompt_file,log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
+    prompt_file:$prompt_file,
+    instruction_sha256:(if $instruction_sha256 == "" then null else $instruction_sha256 end),
+    log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
+    route_id:(if $route_id == "" then null else $route_id end),astra_forced:$astra_forced,
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
     tokens_total:($tokens_total|tonumber? // null),tokens_detail:$tokens_detail,
     cost_usd:($cost_usd|tonumber? // null),

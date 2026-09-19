@@ -1,0 +1,471 @@
+#!/bin/bash
+# delegate-route — 委任前のモデルティア判定ゲート(決定的。LLM も外部 API も呼ばない)
+#
+# 担当する: 推奨ティア・effort の決定 / Astra 週予算の集計と承認ゲート /
+#   指示書の内容確定度チェック / 未確定点の「人間への質問」の生成 / 判定履歴の追記
+# 担当しない: タスク性質の判定(signals は外から JSON で受け取る)/ 実際の委任実行
+#
+# 使い方:
+#   delegate-route --budget
+#   delegate-route --instruction <file> --kind <実装|調査|相談|レビュー> [--signals <json>]
+#     [--series-key <key>] [--escalate-from <run_id>] [--allow-unattended]
+#   delegate-route --route-id <id> [--signals <json>] [--human-facts <json>]   # 再判定(ラウンド+1)
+#   delegate-route --show <route_id>                                          # 最新ラウンドの行を表示
+#
+# 出力: stdout に判定結果の JSON 1 行。人間向けの補足は stderr。
+#   exit 0 = 判定できた(gate が何であれ) / exit 2 = 入力不正
+# 状態: $LOG_DIR/route-decisions.jsonl(ラウンドごとに 1 行)、$LOG_DIR/route-series.json
+# ログ保存先: 環境変数 DELEGATE_LOG_DIR > スキル直下の .env > $HOME/.claude/logs/delegate
+set -u
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_LOG_DIR="${DELEGATE_LOG_DIR:-}"
+[ -f "$SKILL_DIR/.env" ] && { set -a; . "$SKILL_DIR/.env"; set +a; }
+LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}}"
+DECISIONS="$LOG_DIR/route-decisions.jsonl"
+SERIES_FILE="$LOG_DIR/route-series.json"
+DELEGATION_LOG="$LOG_DIR/delegation-log.jsonl"
+
+die() { echo "delegate-route: ERROR: $*" >&2; exit 2; }
+iso_now() { date -u +%FT%TZ; }
+today() { echo "${DELEGATE_ROUTE_TODAY:-$(date +%F)}"; }
+days_ago() {  # $1=日数 → YYYY-MM-DD(BSD date 優先、GNU date へフォールバック)
+  local base; base="$(today)"
+  date -j -f %Y-%m-%d -v "-${1}d" "$base" +%F 2>/dev/null \
+    || date -d "$base -${1} days" +%F 2>/dev/null \
+    || echo "$base"
+}
+sha256_file() {  # $1=ファイル → SHA-256(macOS/BSD を優先、GNU へフォールバック)
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+ASTRA_CAP="${ASTRA_WEEKLY_TOKEN_CAP:-80000000}"
+ASTRA_COUNT_CAP="${ASTRA_WEEKLY_COUNT_CAP:-8}"
+
+# ── Astra 週予算の集計(delegation-log.jsonl の直近 7 暦日)──
+budget_json() {
+  local since; since="$(days_ago 6)"
+  if [ -s "$DELEGATION_LOG" ]; then
+    jq -Rn --arg since "$since" --argjson cap "$ASTRA_CAP" --argjson ccap "$ASTRA_COUNT_CAP" '
+      [inputs | fromjson? | select(type=="object")
+        | . as $row
+        | (($row.model // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) as $model
+        | select($model == "gpt-6-astra")
+        | (($row.date // "") | tostring | .[0:10] | gsub("/"; "-")) as $date
+        | ($date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) as $date_valid
+        | select(($date_valid | not) or $date >= $since)
+        | (try ($row.tokens | tonumber) catch null) as $tokens
+        | {tokens:($tokens // 0), tokens_invalid:($tokens == null), date_invalid:($date_valid | not)}]
+      as $rows
+      | ($rows | map(.tokens) | add // 0) as $tok
+      | ($rows | map(select(.tokens_invalid)) | length) as $nulls
+      | ($rows | map(select(.date_invalid)) | length) as $date_invalid
+      | {astra_tokens_7d:$tok, cap:$cap, astra_count_7d:($rows|length), count_cap:$ccap,
+         tokens_null:$nulls, date_invalid:$date_invalid,
+         over: ($tok >= $cap or ($rows|length) >= $ccap)}
+    ' "$DELEGATION_LOG"
+  else
+    jq -cn --argjson cap "$ASTRA_CAP" --argjson ccap "$ASTRA_COUNT_CAP" \
+      '{astra_tokens_7d:0, cap:$cap, astra_count_7d:0, count_cap:$ccap,
+        tokens_null:0, date_invalid:0, over:false}'
+  fi
+}
+
+# ── 指示書からの決定的特徴抽出 ──
+RISK_TERMS='認証 権限 課金 決済 マイグレーション migration セキュリティ 不可逆 auth billing payment security'
+features_json() {  # $1=指示書パス
+  local f="$1" n t terms=""
+  n="$(grep -o '`[^`]*`' "$f" 2>/dev/null | sed 's/`//g' \
+        | grep -E '(/|\.[A-Za-z0-9]+$)' | sort -u | grep -c . | tr -d ' ')"
+  [ -n "$n" ] || n=0
+  for t in $RISK_TERMS; do
+    if grep -qiF "$t" "$f" 2>/dev/null; then terms="$terms $t"; fi
+  done
+  # shellcheck disable=SC2086
+  jq -cn --argjson n "$n" '{scope_files:$n, risk_terms:($ARGS.positional)}' --args $terms
+}
+
+# ── signals の検証 ──
+validate_signals() {  # $1=JSON 文字列
+  local errs
+  errs="$(printf '%s' "$1" | jq -r '
+    def num($k; $lo; $hi): if (.[$k]|type) != "number" then "\($k): 数値が必要"
+      elif .[$k] < $lo or .[$k] > $hi then "\($k): 範囲外(\($lo)〜\($hi)): \(.[$k])"
+      else empty end;
+    def sc($k; $hi):
+      if (has($k)|not) then "\($k): 必須項目が無い"
+      elif (.[$k]|type) != "object" then "\($k): {score,confidence} が必要"
+      else (.[$k] | num("score"; 0; $hi), num("confidence"; 0; 1)) | "\($k).\(.)"
+      end;
+    if type != "object" then "signals: JSON オブジェクトが必要" else
+      . as $o
+      | ((["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision"][] as $k
+        | if ($o|has($k)|not) then "\($k): 必須項目が無い" else ($o | num($k; 0; 1)) end),
+       sc("difficulty"; 4), sc("regression"; 3), sc("ambiguity"; 3),
+       (if (has("tier")|not) then "tier: 必須項目が無い"
+        elif (.tier|type) != "object" then "tier: {choice,confidence} が必要"
+        else (((.tier.choice // "") as $c
+               | if (["luna","terra","sol","astra"] | index($c)) == null
+                 then "tier.choice: luna|terra|sol|astra のいずれか: \($c)" else empty end),
+              (.tier | num("confidence"; 0; 1) | "tier.\(.)"))
+        end))
+    end' 2>/dev/null)" || die "--signals が JSON として解析できない"
+  if [ -n "$errs" ]; then
+    echo "$errs" | sed 's/^/delegate-route: ERROR: signals 検証: /' >&2
+    exit 2
+  fi
+}
+
+FACT_KEYS='mechanical high_stakes splittable scope_defined behavior_defined done_defined product_decision difficulty regression ambiguity tier astra_approved instruction_changed delegated_to_commander series_apply'
+validate_facts() {  # $1=JSON 文字列
+  local errs
+  errs="$(printf '%s' "$1" | jq -r --arg allowed "$FACT_KEYS" '
+    ($allowed | split(" ")) as $ok
+    | if type != "object" then "human_facts: JSON オブジェクトが必要" else
+      . as $o
+      | ($o | keys_unsorted[] as $k | if ($ok | index($k)) == null then "未知のキー: \($k)" else empty end),
+      (["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision",
+        "astra_approved","instruction_changed","series_apply"][] as $k
+        | if (($o|has($k)) and (($o[$k]|type) != "boolean")) then "\($k): true/false が必要" else empty end),
+      ([{"key":"difficulty","hi":4},{"key":"regression","hi":3},{"key":"ambiguity","hi":3}][] as $v
+        | $v.key as $k
+        | if (($o|has($k)) and (($o[$k]|type) != "number")) then "\($k): 数値が必要"
+          elif (($o|has($k)) and ($o[$k] < 0 or $o[$k] > $v.hi))
+          then "\($k): 範囲外(0〜\($v.hi)): \($o[$k])" else empty end),
+      (if (($o|has("tier")) and ((["luna","terra","sol","astra"] | index($o.tier)) == null))
+       then "tier: luna|terra|sol|astra のいずれか" else empty end),
+      (if (($o|has("delegated_to_commander")) and (($o.delegated_to_commander|type) != "array"))
+       then "delegated_to_commander: 軸名の配列が必要"
+       elif ($o|has("delegated_to_commander")) then
+         ($o.delegated_to_commander[] as $k
+          | if (($k|type) != "string") then "delegated_to_commander: 軸名は文字列が必要"
+            elif (["scope_defined","behavior_defined","done_defined","product_decision","ambiguity",
+                   "mechanical","high_stakes","splittable","difficulty","regression","tier"] | index($k)) == null
+            then "delegated_to_commander: 許可されない軸: \($k)" else empty end)
+       else empty end)
+    end' 2>/dev/null)" || die "--human-facts が JSON として解析できない"
+  if [ -n "$errs" ]; then
+    echo "$errs" | sed 's/^/delegate-route: ERROR: human_facts 検証: /' >&2
+    exit 2
+  fi
+}
+
+# ── 引数 ──────────────────────────────────────────────
+MODE="" INSTRUCTION="" KIND="" SIGNALS="" SERIES_KEY="" ESCALATE="" ROUTE_ID="" FACTS="" SHOW_ID=""
+ALLOW_UNATTENDED=0 HAVE_SIGNALS=0 HAVE_FACTS=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --budget) MODE="budget"; shift ;;
+    --show) MODE="show"; SHOW_ID="${2:?}"; shift 2 ;;
+    --instruction) INSTRUCTION="${2:?}"; shift 2 ;;
+    --kind) KIND="${2:?}"; shift 2 ;;
+    --signals) SIGNALS="${2:?}"; HAVE_SIGNALS=1; shift 2 ;;
+    --series-key) SERIES_KEY="${2:?}"; shift 2 ;;
+    --escalate-from) ESCALATE="${2:?}"; shift 2 ;;
+    --route-id) ROUTE_ID="${2:?}"; shift 2 ;;
+    --human-facts) FACTS="${2:?}"; HAVE_FACTS=1; shift 2 ;;
+    --allow-unattended) ALLOW_UNATTENDED=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) die "不明な引数: $1" ;;
+  esac
+done
+
+if [ "$MODE" = "budget" ]; then
+  budget_json | jq -c .
+  exit 0
+fi
+
+if [ "$MODE" = "show" ]; then
+  [ -s "$DECISIONS" ] || die "route-decisions.jsonl が存在しないか空"
+  LINE="$(jq -Rrc --arg r "$SHOW_ID" \
+    'fromjson? | select(type == "object" and .route_id == $r)' \
+    "$DECISIONS" 2>/dev/null | tail -1)"
+  [ -n "$LINE" ] || die "route_id が見つからない: $SHOW_ID"
+  printf '%s\n' "$LINE"
+  exit 0
+fi
+
+# ── 前ラウンドの引き継ぎ ──
+PREV=""
+ROUND=1
+PREV_FACTS='{}'
+PREV_SIGNALS=''
+PREV_OPENS='[]'
+PREV_INSTRUCTION_SHA256=''
+if [ -n "$ROUTE_ID" ]; then
+  [ -s "$DECISIONS" ] || die "route-decisions.jsonl が存在しないか空(--route-id $ROUTE_ID)"
+  PREV="$(jq -Rrc --arg r "$ROUTE_ID" \
+    'fromjson? | select(type == "object" and .route_id == $r)' \
+    "$DECISIONS" 2>/dev/null | tail -1)"
+  [ -n "$PREV" ] || die "route_id が見つからない: $ROUTE_ID"
+  INSTRUCTION="$(printf '%s' "$PREV" | jq -r '.instruction')"
+  KIND="$(printf '%s' "$PREV" | jq -r '.kind')"
+  SERIES_KEY="$(printf '%s' "$PREV" | jq -r '.series_key // ""')"
+  ESCALATE="$(printf '%s' "$PREV" | jq -r '.escalate_from // ""')"
+  ROUND=$(( $(printf '%s' "$PREV" | jq -r '.round') + 1 ))
+  PREV_FACTS="$(printf '%s' "$PREV" | jq -c '.human_facts // {}')"
+  PREV_INSTRUCTION_SHA256="$(printf '%s' "$PREV" | jq -r '.instruction_sha256 // ""')"
+  PREV_SIGNALS="$(printf '%s' "$PREV" | jq -c 'if .signals == null then "" else .signals end' | sed 's/^""$//')"
+  PREV_OPENS="$(jq -Rn --arg r "$ROUTE_ID" \
+    '[inputs | fromjson? | select(type == "object" and .route_id == $r) | [.open[]?.reason]]' \
+    "$DECISIONS" 2>/dev/null)"
+  [ -n "$PREV_OPENS" ] || PREV_OPENS='[]'
+else
+  [ -n "$INSTRUCTION" ] || die "--instruction は必須(または --route-id / --budget / --show)"
+  case "$KIND" in 実装|調査|相談|レビュー) ;; *) die "--kind は 実装|調査|相談|レビュー" ;; esac
+fi
+[ -n "$INSTRUCTION" ] || die "--instruction は必須"
+case "$INSTRUCTION" in /*) ;; *) INSTRUCTION="$(cd "$(dirname "$INSTRUCTION")" 2>/dev/null && pwd)/$(basename "$INSTRUCTION")" ;; esac
+[ -s "$INSTRUCTION" ] || die "指示書が存在しないか空: $INSTRUCTION"
+INSTRUCTION_SHA256="$(sha256_file "$INSTRUCTION")"
+[ -n "$INSTRUCTION_SHA256" ] || die "指示書の SHA-256 を計算できない: $INSTRUCTION"
+
+# ── signals / human_facts の検証とマージ ──
+if [ "$HAVE_SIGNALS" -eq 1 ]; then
+  validate_signals "$SIGNALS"
+else
+  SIGNALS="$PREV_SIGNALS"
+fi
+
+NEW_FACTS='{}'
+INSTRUCTION_CHANGED=0
+if [ "$HAVE_FACTS" -eq 1 ]; then
+  validate_facts "$FACTS"
+  NEW_FACTS="$FACTS"
+fi
+if printf '%s' "$NEW_FACTS" | jq -e '.instruction_changed == true' >/dev/null 2>&1; then
+  INSTRUCTION_CHANGED=1
+  [ "$HAVE_SIGNALS" -eq 1 ] || die "instruction_changed:true のときは --signals の再指定が必須(指示書が変わったため内容軸を再評価する)"
+fi
+if [ "$ROUND" -gt 1 ] && [ "$INSTRUCTION_SHA256" != "$PREV_INSTRUCTION_SHA256" ] \
+   && [ "$INSTRUCTION_CHANGED" -eq 0 ]; then
+  die "指示書が変わっている。判定し直して instruction_changed:true と新しい --signals を渡す"
+fi
+
+# ── series の保持(モデル軸のみ・24 時間有効)──
+SERIES_FACTS='{}'
+if [ -n "$SERIES_KEY" ] && [ "$ROUND" -eq 1 ] && [ -s "$SERIES_FILE" ]; then
+  SERIES_FACTS="$(jq -c --arg k "$SERIES_KEY" --argjson now "$(date +%s)" \
+    '(.[$k] // empty) | select((($now - (.ts_epoch // 0)) < 86400)) | (.facts // {})' \
+    "$SERIES_FILE" 2>/dev/null)"
+  [ -n "$SERIES_FACTS" ] || SERIES_FACTS='{}'
+fi
+
+FACTS_MERGED="$(jq -cn \
+  --argjson s "$SERIES_FACTS" --argjson p "$PREV_FACTS" --argjson n "$NEW_FACTS" \
+  --argjson changed "$INSTRUCTION_CHANGED" \
+  'if $changed == 1
+   then (($s | del(.astra_approved)) * ($p | del(.astra_approved)) * $n)
+   else ($s * $p * $n)
+   end')"
+
+BUDGET="$(budget_json | jq -c .)"
+FEATURES="$(features_json "$INSTRUCTION")"
+[ -n "$ROUTE_ID" ] || ROUTE_ID="rt_$(date +%Y%m%d-%H%M%S)_$(uuidgen | tr -d - | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+
+SIGNALS_ARG="null"
+[ -n "$SIGNALS" ] && SIGNALS_ARG="$SIGNALS"
+
+RECORD="$(jq -cn \
+  --arg route_id "$ROUTE_ID" --argjson round "$ROUND" --arg kind "$KIND" \
+  --arg instruction "$INSTRUCTION" --arg instruction_sha256 "$INSTRUCTION_SHA256" \
+  --arg series_key "$SERIES_KEY" --arg escalate "$ESCALATE" \
+  --arg ts "$(iso_now)" --argjson unattended_flag "$ALLOW_UNATTENDED" \
+  --argjson signals "$SIGNALS_ARG" --argjson facts "$FACTS_MERGED" \
+  --argjson budget "$BUDGET" --argjson features "$FEATURES" --argjson prev_opens "$PREV_OPENS" '
+
+def tiernum: {"luna":0,"terra":1,"sol":2,"astra":3}[.];
+def model_of: {"luna":"gpt-5.6-luna","terra":"gpt-5.6-terra","sol":"gpt-5.6-sol","astra":"gpt-6-astra"}[.];
+def mtok: (. / 1000000 * 10 | floor) / 10;
+def abs: if . < 0 then -. else . end;
+
+["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision"] as $nouls
+| (if $signals == null then null else
+     ($signals
+      | reduce $nouls[] as $k (.; if ($facts|has($k)) then .[$k] = (if $facts[$k] then 1.0 else 0.0 end) else . end)
+      | reduce ("difficulty","regression","ambiguity") as $k (.;
+          if ($facts|has($k)) then .[$k] = {score: $facts[$k], confidence: 1.0} else . end))
+   end) as $s
+| ($facts.tier // null) as $htier
+| ($features.risk_terms | length > 0) as $risky
+
+# ── 決定式による推奨 ──
+| (if $s == null then
+     (if $risky then {tier:"sol", effort:"high", advice:null, cand:false}
+      else {tier:"terra", effort:"medium", advice:null, cand:false} end)
+   elif $s.mechanical >= 0.8 then
+     (if $features.scope_files > 5 then {tier:"terra", effort:"medium", advice:null, cand:false}
+      else {tier:"luna", effort:"medium", advice:null, cand:false} end)
+   elif $s.high_stakes >= 0.8 then {tier:"astra", effort:"max", advice:null, cand:true}
+   elif ($escalate != "") then {tier:"astra", effort:"high", advice:null, cand:true}
+   elif ($s.difficulty.score >= 3.2 and $s.splittable <= 0.3) then {tier:"astra", effort:"high", advice:null, cand:true}
+   elif ($s.difficulty.score >= 3.2) then {tier:"terra", effort:"high", advice:"split", cand:false}
+   elif ($s.difficulty.score >= 2.5 or $s.regression.score >= 2) then {tier:"sol", effort:"high", advice:null, cand:false}
+   else {tier:"terra", effort:(if $s.difficulty.score >= 1.5 then "high" else "medium" end), advice:null, cand:false}
+   end) as $base
+
+# ── 人間の tier 指定が最優先 ──
+| (if $htier == null then $base else
+     {tier: $htier,
+      effort: (if $htier == "astra" then (if ($s != null and $s.high_stakes >= 0.8) then "max" else "high" end)
+               elif $htier == "sol" then "high"
+               elif $htier == "luna" then "medium"
+               else (if ($s != null and $s.difficulty.score >= 1.5) then "high" else "medium" end) end),
+      advice: null, cand: ($htier == "astra")}
+   end) as $r1
+
+# ── 固定ルール: 調査/相談/レビューでは Astra を使わない ──
+| (if ($r1.cand and (["調査","相談","レビュー"] | index($kind)) != null)
+   then {r: ($r1 + {tier:"sol", effort:"high", cand:false}), rules:["no_astra_for_kind"]}
+   else {r: $r1, rules: []} end) as $k1
+| $k1.r as $r2 | $k1.rules as $rules1
+
+# ── Astra 候補の扱い(承認と予算)──
+| (if ($facts|has("astra_approved")) then $facts.astra_approved else null end) as $ap
+| (if ($r2.cand | not) then {r:$r2, ask:false, rules:[]}
+   elif $ap == true then {r:$r2, ask:false, rules:["astra_approved"]}
+   elif $ap == false then {r: ($r2 + {tier:"sol", effort:"high"}), ask:false, rules:["astra_declined"]}
+   elif $budget.over then {r: ($r2 + {tier:"sol", effort:"high"}), ask:true, rules:["astra_budget_over"]}
+   else {r:$r2, ask:true, rules:[]} end) as $k2
+| $k2.r as $rec | ($rules1 + $k2.rules) as $rules
+
+# ── 人間が答えた軸(= 確定済み。二度と open に出さない)──
+| ([ ($facts | keys_unsorted[] as $k
+       | if (["instruction_changed","series_apply","delegated_to_commander"] | index($k)) == null then $k else empty end),
+     (($facts.delegated_to_commander // [])[]) ] | unique) as $confirmed
+
+# ── 未確定軸 ──
+| (if $s == null then [] else
+     [ (if $s.scope_defined >= 0.8 then empty else "scope_defined" end),
+       (if $s.behavior_defined >= 0.8 then empty else "behavior_defined" end),
+       (if $s.done_defined >= 0.8 then empty else "done_defined" end),
+       (if $s.product_decision <= 0.2 then empty else "product_decision" end),
+       (if $s.ambiguity.score <= 1.0 then empty else "ambiguity" end) ]
+   end) as $content_open
+# tier の推奨との段差(d)。d==0 は confidence が低くても質問しない(同じティアを聞き返さない)
+| (if $s == null then 0 else ((($s.tier.choice|tiernum) - ($r2.tier|tiernum)) | abs) end) as $tier_gap
+# 人間が Astra 承認に答えた、または推奨の根拠(high_stakes/difficulty/regression)を直接答えたら tier は確定扱い
+| (($facts|has("astra_approved"))
+   or (($facts|has("high_stakes")) and ($facts|has("difficulty")) and ($facts|has("regression")))) as $tier_settled
+# difficulty / regression は「推奨を左右する位置(しきい値の ±0.5 以内)」にあるときだけ質問にする
+| (if $s == null then false else
+     ([1.5, 2.5, 3.2] | map((. - $s.difficulty.score) | abs) | min) <= 0.5 end) as $diff_pivotal
+| (if $s == null then false else (($s.regression.score - 2) | abs) <= 0.5 end) as $reg_pivotal
+| (if $s == null then false else
+     ($s.mechanical < 0.8 and $s.high_stakes < 0.8 and $escalate == "")
+   end) as $score_axes_relevant
+| (if ($s == null or $htier != null) then [] else
+     [ (if ($s.high_stakes <= 0.2 or $s.high_stakes >= 0.8) then empty else "high_stakes" end),
+       (if ($s.difficulty.score >= 3.2 and ($s.splittable > 0.2 and $s.splittable < 0.8)) then "splittable" else empty end),
+       (if ($s.mechanical <= 0.2 or $s.mechanical >= 0.8) then empty else "mechanical" end),
+       (if ($score_axes_relevant and $s.difficulty.confidence < 0.9 and $diff_pivotal) then "difficulty" else empty end),
+       (if ($score_axes_relevant and $s.regression.confidence < 0.9 and $reg_pivotal) then "regression" else empty end),
+       (if ($tier_settled | not)
+           and (($tier_gap >= 2) or ($tier_gap == 1 and $s.tier.confidence < 0.9))
+        then "tier" else empty end) ]
+   end) as $model_open
+| (if ($s == null and $htier == null) then ["fallback_confirm"] else [] end) as $fb_open
+| (if $k2.ask then ["astra_approval"] else [] end) as $astra_open
+
+| ($content_open + $model_open + $fb_open + $astra_open
+   | map(. as $x | select(($confirmed | index($x)) == null))) as $reasons
+
+# ── 収束保証: 同じ軸が直前 2 ラウンド連続で open なら must_decide ──
+| (($prev_opens | length) as $n
+   | if $n >= 2 then (($prev_opens[$n-1]) - (($prev_opens[$n-1]) - ($prev_opens[$n-2]))) else [] end) as $streak2
+
+| ($budget.astra_tokens_7d | mtok) as $tok_m
+| ($budget.cap | mtok) as $cap_m
+
+| [ $reasons[] as $reason
+    | (if (["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"] | index($reason)) != null
+       then "content" else "model" end) as $axis
+    | {axis: $axis, reason: $reason,
+       question:
+         (if $reason == "scope_defined" then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。対象と除外範囲を確定してください。"
+          elif $reason == "behavior_defined" then "変更後のユーザー可視挙動・仕様値が一意に決まっていません。挙動を確定してください。"
+          elif $reason == "done_defined" then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。確定してください。"
+          elif $reason == "product_decision" then "未確認の製品判断が含まれています。判断を確定してください。"
+          elif $reason == "ambiguity" then "指示書に未確定の判断が残っています。解消してください。"
+          elif $reason == "high_stakes" then "この変更は重要・高リスク扱いにしますか?"
+          elif $reason == "splittable" then "レビュー可能な独立単位に分割して複数回で委任できますか?"
+          elif $reason == "mechanical" then "この作業は挙動不変の機械的な作業(move-only・rename・整形)ですか?"
+          elif $reason == "difficulty" then "難度の判定が確信に欠けます(score=\($s.difficulty.score)・confidence=\($s.difficulty.confidence))。難度を指定してください。"
+          elif $reason == "regression" then "退行時の被害の判定が確信に欠けます(score=\($s.regression.score)・confidence=\($s.regression.confidence))。被害度を指定してください。"
+          elif $reason == "tier" then
+            (if $tier_gap >= 2
+             then "判定者のティア候補(\($s.tier.choice))と決定式の推奨(\($r2.tier))が 2 段以上離れています。どちらにしますか?"
+             else "判定者のティア候補(\($s.tier.choice)・confidence=\($s.tier.confidence))と決定式の推奨(\($r2.tier))が 1 段ずれ、判定者の確信も低いです。どちらにしますか?"
+             end)
+          elif $reason == "fallback_confirm" then "判定者の信号がありません。静的ルールの推奨は \($rec.tier)/\($rec.effort) です。このティアで進めますか?"
+          else "Astra(gpt-6-astra)を使いますか? 今週 \($budget.astra_count_7d)/\($budget.count_cap) 件・\($tok_m)M/\($cap_m)M を消費しています。"
+          end),
+       options:
+         (if $axis == "content" then ["指示書に追記して再判定する","司令塔の判断に任せる"]
+          elif $reason == "high_stakes" then ["高リスク扱いにする","通常扱いにする"]
+          elif $reason == "splittable" then ["分割する","分割しない"]
+          elif $reason == "mechanical" then ["機械的な作業として扱う","通常の実装として扱う"]
+          elif $reason == "difficulty" then ["0","1","2","3","4"]
+          elif $reason == "regression" then ["0","1","2","3"]
+          elif $reason == "tier" or $reason == "fallback_confirm" then ["luna","terra","sol","astra"]
+          elif $budget.over then ["Sol で代替(推奨)","分割して Terra","超過を承知で Astra を使う"]
+          else ["Astra を使う","Sol で代替","分割して Terra"]
+          end),
+       must_decide: (($streak2 | index($reason)) != null)}
+  ] as $open
+
+| (if ($open | length) == 0 then "confirmed"
+   elif ($s == null and $htier == null) then "fallback"
+   else "ask_human" end) as $gate0
+| (($gate0 == "ask_human" or $gate0 == "fallback")
+   and $unattended_flag == 1
+   and $rec.tier != "astra"
+   and ([$open[] | select(.reason == "fallback_confirm")] | length) == 0
+   and ([$open[] | select(.axis != "model")] | length) == 0) as $unattended
+| (if $unattended then "confirmed" else $gate0 end) as $gate
+
+| {route_id: $route_id, round: $round, kind: $kind, instruction: $instruction,
+   instruction_sha256: $instruction_sha256,
+   series_key: (if $series_key == "" then null else $series_key end),
+   escalate_from: (if $escalate == "" then null else $escalate end),
+   recommend: {model: ($rec.tier | model_of), effort: $rec.effort},
+   advice: $rec.advice,
+   gate: $gate, unattended: $unattended,
+   open: $open, confirmed_axes: $confirmed, rules_applied: $rules,
+   signals: $signals, human_facts: $facts,
+   astra_candidate: $r2.cand, astra_approved: ($ap == true),
+   features: $features, budget: $budget, ts: $ts}
+')" || die "判定に失敗した(signals / human_facts を確認する)"
+
+[ -n "$RECORD" ] || die "判定結果が空になった"
+
+mkdir -p "$LOG_DIR"
+printf '%s\n' "$RECORD" >> "$DECISIONS"
+
+# ── series の保持書き込み(再判定時に series_apply:true が来たときだけ)──
+if [ -n "$SERIES_KEY" ] && printf '%s' "$NEW_FACTS" | jq -e '.series_apply == true' >/dev/null 2>&1; then
+  [ -s "$SERIES_FILE" ] || echo '{}' > "$SERIES_FILE"
+  jq --arg k "$SERIES_KEY" --argjson now "$(date +%s)" --argjson f "$FACTS_MERGED" \
+    '.[$k] = {ts_epoch:$now, facts: ($f | with_entries(select(.key |
+       IN("mechanical","high_stakes","splittable","difficulty","regression","tier"))))}' \
+    "$SERIES_FILE" > "$SERIES_FILE.tmp" && mv "$SERIES_FILE.tmp" "$SERIES_FILE"
+fi
+
+printf '%s\n' "$RECORD"
+
+# ── 人間向けの補足(stderr)──
+G="$(printf '%s' "$RECORD" | jq -r '.gate')"
+R="$(printf '%s' "$RECORD" | jq -r '.recommend.model + "/" + .recommend.effort')"
+echo "delegate-route: route_id $ROUTE_ID / round $ROUND / gate $G / 推奨 $R" >&2
+if [ "$G" != "confirmed" ]; then
+  printf '%s' "$RECORD" | jq -r '.open[] | "  [\(.axis)/\(.reason)]\(if .must_decide then "(must_decide)" else "" end) \(.question)"' >&2
+  echo "  回答後: delegate-route --route-id $ROUTE_ID --human-facts '{…}' で再判定する" >&2
+fi
+exit 0
