@@ -243,15 +243,20 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes =
 assert_j "モデル軸: high_stakes 中間値は未確定" '[.open[] | select(.reason=="high_stakes" and .axis=="model")] | length' "1"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.mechanical = 0.5')"
 assert_j "モデル軸: mechanical 中間値は未確定" '[.open[] | select(.reason=="mechanical")] | length' "1"
-# difficulty / regression は「推奨を左右する位置(しきい値 ±0.5 以内)」のときだけ聞く
-run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
-assert_j "モデル軸: difficulty 低確信 + しきい値近傍(2.1)は未確定" '[.open[] | select(.reason=="difficulty")] | length' "1"
+# difficulty は常に判定者の score を決定式へ渡し、従来質問になった条件だけ自動採用として記録する
+runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
+assert_j "difficulty: 低確信 + しきい値近傍(2.1)でも質問しない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "difficulty: 低確信 + しきい値近傍(2.1)は自動採用" '.auto_decided | tojson' '["difficulty"]'
+assert_contains "difficulty: 自動採用を stderr に補足する" "自動採用: difficulty(score=2.1 / confidence=0.5)"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.95')"
+assert_j "difficulty: 高確信(2.1)は自動採用しない" '.auto_decided | tojson' '[]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 0.5 | .difficulty.confidence = 0.5')"
-assert_j "モデル軸: difficulty 低確信でもしきい値から遠ければ聞かない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "difficulty: 低確信でもしきい値から遠い(0.5)なら自動採用しない" '.auto_decided | tojson' '[]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 2.0 | .difficulty.confidence = 0.5')"
-assert_j "モデル軸: difficulty しきい値 ±0.5 の境界(2.0)は未確定" '[.open[] | select(.reason=="difficulty")] | length' "1"
+assert_j "difficulty: しきい値 ±0.5 の境界(2.0)も質問しない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "difficulty: しきい値 ±0.5 の境界(2.0)は自動採用" '.auto_decided | tojson' '["difficulty"]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 2.1')"
-assert_j "モデル軸: difficulty 高確信なら近傍でも聞かない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "difficulty: 高確信なら近傍でも自動採用しない" '.auto_decided | tojson' '[]'
 
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.regression.score = 1.8 | .regression.confidence = 0.5')"
 assert_j "モデル軸: regression 低確信 + 2 近傍は未確定" '[.open[] | select(.reason=="regression")] | length' "1"
@@ -262,8 +267,11 @@ assert_j "モデル軸: regression の境界(1.5)は未確定" '[.open[] | selec
 
 # difficulty / regression 以外の規則で推奨が決まる場合は、低確信でも両軸を聞かない
 PIVOT='.difficulty.score = 2.5 | .difficulty.confidence = 0.65 | .regression.score = 2 | .regression.confidence = 0.75'
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 2.1 | .difficulty.confidence = 0.5 | .high_stakes = 0.9 | .tier.choice = "astra"')"
+assert_j "difficulty: high_stakes=0.9 では低確信・近傍でも自動採用しない" '.auto_decided | tojson' '[]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$PIVOT | .high_stakes = 0.85 | .tier.choice = \"terra\"")"
 assert_j "モデル軸: high_stakes 決定時は difficulty を聞かない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "モデル軸: high_stakes>=0.8 では difficulty を自動採用しない" '.auto_decided | tojson' '[]'
 assert_j "モデル軸: high_stakes 決定時は regression を聞かない" '[.open[] | select(.reason=="regression")] | length' "0"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$PIVOT | .mechanical = 0.9")"
 assert_j "モデル軸: mechanical 決定時は difficulty を聞かない" '[.open[] | select(.reason=="difficulty")] | length' "0"
@@ -272,7 +280,8 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --escalate-from run_pivot --sign
 assert_j "モデル軸: escalate 決定時は difficulty を聞かない" '[.open[] | select(.reason=="difficulty")] | length' "0"
 assert_j "モデル軸: escalate 決定時は regression を聞かない" '[.open[] | select(.reason=="regression")] | length' "0"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$PIVOT | .tier.choice = \"sol\"")"
-assert_j "モデル軸: score 決定時は difficulty を従来どおり聞く" '[.open[] | select(.reason=="difficulty")] | length' "1"
+assert_j "モデル軸: score 決定時も difficulty を質問しない" '[.open[] | select(.reason=="difficulty")] | length' "0"
+assert_j "モデル軸: score 決定時は difficulty を自動採用する" '.auto_decided | tojson' '["difficulty"]'
 assert_j "モデル軸: score 決定時は regression を従来どおり聞く" '[.open[] | select(.reason=="regression")] | length' "1"
 
 # tier は「2 段以上離れている」か「1 段ずれ + 低確信」のときだけ聞く
@@ -289,7 +298,7 @@ assert_j "モデル軸: tier 2段違いは高確信でも未確定" '[.open[] | 
 assert_contains "モデル軸: 2段以上の質問文" "2 段以上離れています"
 assert_contains "モデル軸: tier 質問に両者を出す" "決定式の推奨(terra)"
 
-# tier の確定扱い: astra_approved に答えた / 推奨の根拠 3 軸に答えた
+# tier の確定扱い: astra_approved に答えた / 推奨の根拠 high_stakes と regression に答えた
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra"')"
 RID_TS="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TS" --human-facts '{"astra_approved":false}'
@@ -300,13 +309,13 @@ run "$BIN" --route-id "$RID_TS2" --human-facts '{"astra_approved":true}'
 assert_j "tier: astra_approved(true)に答えたら聞かない" '[.open[] | select(.reason=="tier")] | length' "0"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra"')"
 RID_TS3="$(jget '.route_id')"
-run "$BIN" --route-id "$RID_TS3" --human-facts '{"high_stakes":false,"difficulty":2.1,"regression":1}'
-assert_j "tier: 根拠 3 軸に答えたら聞かない" '[.open[] | select(.reason=="tier")] | length' "0"
-assert_j "tier: 根拠 3 軸に答えたら確定" '.gate' "confirmed"
+run "$BIN" --route-id "$RID_TS3" --human-facts '{"high_stakes":false,"regression":1}'
+assert_j "tier: 根拠 high_stakes/regression に答えたら聞かない" '[.open[] | select(.reason=="tier")] | length' "0"
+assert_j "tier: 根拠 high_stakes/regression に答えたら確定" '.gate' "confirmed"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra"')"
 RID_TS4="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TS4" --human-facts '{"high_stakes":false,"difficulty":2.1}'
-assert_j "tier: 根拠が 2 軸だけなら依然として聞く" '[.open[] | select(.reason=="tier")] | length' "1"
+assert_j "tier: regression が無ければ依然として聞く" '[.open[] | select(.reason=="tier")] | length' "1"
 
 # splittable は difficulty < 3.2 のとき確定条件から除外する
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.splittable = 0.5')"
@@ -343,12 +352,22 @@ assert_exit "human_facts: ambiguity 範囲外は exit 2" 2
 runE "$BIN" --route-id rt_nosuch --human-facts '{}'
 assert_exit "human_facts: 未知 route_id は exit 2" 2
 
+# human_facts の difficulty は score を上書きして決定式に使い、自動採用にはしない
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 1.0')"
+RID_HF_DIFF="$(jget '.route_id')"
+assert_j "human_facts difficulty 前: score=1 で terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
+run "$BIN" --route-id "$RID_HF_DIFF" --human-facts '{"difficulty":3}'
+assert_j "human_facts difficulty: score を 3 に上書き" '.human_facts.difficulty' "3"
+assert_j "human_facts difficulty: 決定式へ効かせる" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "human_facts difficulty: 自動採用しない" '.auto_decided | tojson' '[]'
+
 # 人間の tier 指定は決定式より優先し、モデル軸を確定扱いにする
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.4 | .tier.confidence = 0.4')"
 RID_TIER="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TIER" --human-facts '{"tier":"sol"}'
 assert_j "tier 指定: 推奨を固定" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
 assert_j "tier 指定: モデル軸は確定扱い" '.gate' "confirmed"
+assert_j "tier 指定: difficulty を自動採用しない" '.auto_decided | tojson' '[]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig)"
 RID_TIER2="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TIER2" --human-facts '{"tier":"astra"}'
@@ -365,6 +384,11 @@ RID_DC="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_DC" --human-facts '{"delegated_to_commander":["mechanical"]}'
 assert_j "delegated_to_commander: 確定扱い" '[.open[] | select(.reason=="mechanical")] | length' "0"
 assert_j "delegated_to_commander: confirmed_axes に載る" '[.confirmed_axes[] | select(. == "mechanical")] | length' "1"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
+RID_DC_DIFF="$(jget '.route_id')"
+run "$BIN" --route-id "$RID_DC_DIFF" --human-facts '{"delegated_to_commander":["difficulty"]}'
+assert_j "delegated_to_commander: difficulty を自動採用しない" '.auto_decided | tojson' '[]'
+assert_j "delegated_to_commander: difficulty を confirmed_axes に載せる" '[.confirmed_axes[] | select(. == "difficulty")] | length' "1"
 runE "$BIN" --route-id "$RID_DC" --human-facts '{"delegated_to_commander":["astra_approval"]}'
 assert_exit "delegated_to_commander: astra_approval は拒否" 2
 assert_contains "delegated_to_commander: astra_approval を名指し" "astra_approval"
@@ -469,6 +493,7 @@ assert_j "fallback: gate" '.gate' "fallback"
 assert_j "fallback: 高リスク語なしは terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
 assert_j "fallback: 確認質問を 1 問出す" '[.open[] | select(.reason=="fallback_confirm" and .axis=="model")] | length' "1"
 assert_j "fallback: signals は null" '.signals' "null"
+assert_j "fallback: difficulty を自動採用しない" '.auto_decided | tojson' '[]'
 RID_FB="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"tier":"terra"}'
 assert_j "fallback: tier 指定で確定" '.gate' "confirmed"
@@ -480,8 +505,8 @@ assert_j "fallback: risk_terms を出す" '.features.risk_terms | join(",")' "�
 
 # ── allow-unattended ─────────────────────────────────
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$(sig '.difficulty.confidence = 0.5')"
-assert_j "unattended: model 軸のみなら confirmed" '.gate' "confirmed"
-assert_j "unattended: 印を残す" '.unattended' "true"
+assert_j "unattended: difficulty のみなら confirmed" '.gate' "confirmed"
+assert_j "unattended: 質問が無いため印を立てない" '.unattended' "false"
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$(sig '.scope_defined = 0.5')"
 assert_j "unattended: 内容軸が残るなら不可" '.gate' "ask_human"
 assert_j "unattended: 不可なら印も立たない" '.unattended' "false"
@@ -491,7 +516,7 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended
 assert_j "unattended: fallback_confirm が残るときは fallback のまま" '.gate' "fallback"
 assert_j "unattended: fallback は印も立たない" '.unattended' "false"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
-assert_j "unattended: 指定しなければ ask_human のまま" '.gate' "ask_human"
+assert_j "unattended: 指定しなくても difficulty のみなら confirmed" '.gate' "confirmed"
 
 # ── 回帰シナリオ: 実走スモークで出た 3 ラウンドの収束 ──
 SC='{"judge":"claude-agent:sonnet",
@@ -503,7 +528,8 @@ SC='{"judge":"claude-agent:sonnet",
  "scope_defined":0.95,"behavior_defined":0.82,"done_defined":0.9,"product_decision":0.2}'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(printf '%s' "$SC" | jq -c .)"
 assert_exit "回帰: round1 は判定できる" 0
-assert_j "回帰: round1 の open は ambiguity/high_stakes/difficulty のみ" '[.open[].reason] | join(",")' "ambiguity,high_stakes,difficulty"
+assert_j "回帰: round1 の open は ambiguity/high_stakes のみ" '[.open[].reason] | join(",")' "ambiguity,high_stakes"
+assert_j "回帰: round1 の difficulty は自動採用" '.auto_decided | tojson' '["difficulty"]'
 assert_j "回帰: round1 は regression を聞かない(score=1.3)" '[.open[] | select(.reason=="regression")] | length' "0"
 assert_j "回帰: round1 は tier を聞かない(推奨 sol と d=0)" '[.open[] | select(.reason=="tier")] | length' "0"
 assert_j "回帰: round1 の推奨" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
@@ -557,6 +583,10 @@ BADLINES="$(grep -cv '^$' "$DELEGATE_LOG_DIR/route-decisions.jsonl" >/dev/null; 
 OUT="$BADLINES"; [ "$BADLINES" = "ok" ] && ok || ng "記録: route-decisions.jsonl の全行が JSON として妥当"
 OUT="$(jq -s -r '[.[] | select((.route_id|type)!="string" or (.round|type)!="number" or (.gate|type)!="string" or (.open|type)!="array" or (.budget|type)!="object")] | length' "$DELEGATE_LOG_DIR/route-decisions.jsonl")"
 [ "$OUT" = "0" ] && ok || ng "記録: 全行が出力スキーマを満たす"
+OUT="$(jq -s -r '[.[] | select((.auto_decided|type)!="array")] | length' "$DELEGATE_LOG_DIR/route-decisions.jsonl")"
+[ "$OUT" = "0" ] && ok || ng "記録: 全行に auto_decided 配列がある"
+OUT="$(jq -s -r '[.[] | select(.route_id == $rid and (.auto_decided | index("difficulty") != null))] | length' --arg rid "$RID_SC" "$DELEGATE_LOG_DIR/route-decisions.jsonl")"
+[ "$OUT" = "1" ] && ok || ng "記録: route-decisions.jsonl に difficulty の自動採用を記録する"
 OUT="$(jq -s -r '[.[] | select(.ts == null)] | length' "$DELEGATE_LOG_DIR/route-decisions.jsonl")"
 [ "$OUT" = "0" ] && ok || ng "記録: 全行に ts がある"
 
