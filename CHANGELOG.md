@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.1] - 2026-09-20
+
+### Changed
+
+- delegate-route: 難度(`difficulty`)を人間への質問に出さず、判定者の値をそのまま決定式に使う。確信が低くしきい値付近だった場合は出力・記録行の `auto_decided` に残す。`tier` の突き合わせの確定条件は、人間が `high_stakes` と `regression` を答えた場合に成立する形へ変更(`difficulty` を条件から除外)。`--human-facts` の `difficulty` による上書きは引き続き可能
+- SKILL / lessons: 難度は自己判断とし、司令塔による上書きの条件と、自動採用の見直し指標を追記
+
 ## [0.26.0] - 2026-09-19
 
 ### Added

@@ -351,21 +351,27 @@ def abs: if . < 0 then -. else . end;
    end) as $content_open
 # tier の推奨との段差(d)。d==0 は confidence が低くても質問しない(同じティアを聞き返さない)
 | (if $s == null then 0 else ((($s.tier.choice|tiernum) - ($r2.tier|tiernum)) | abs) end) as $tier_gap
-# 人間が Astra 承認に答えた、または推奨の根拠(high_stakes/difficulty/regression)を直接答えたら tier は確定扱い
+# 人間が Astra 承認に答えた、または推奨の根拠(high_stakes/regression)を直接答えたら tier は確定扱い
 | (($facts|has("astra_approved"))
-   or (($facts|has("high_stakes")) and ($facts|has("difficulty")) and ($facts|has("regression")))) as $tier_settled
-# difficulty / regression は「推奨を左右する位置(しきい値の ±0.5 以内)」にあるときだけ質問にする
+   or (($facts|has("high_stakes")) and ($facts|has("regression")))) as $tier_settled
+# difficulty は「推奨を左右する位置(しきい値の ±0.5 以内)」かつ低確信なら、判定者の値を自動採用として記録する
 | (if $s == null then false else
      ([1.5, 2.5, 3.2] | map((. - $s.difficulty.score) | abs) | min) <= 0.5 end) as $diff_pivotal
 | (if $s == null then false else (($s.regression.score - 2) | abs) <= 0.5 end) as $reg_pivotal
 | (if $s == null then false else
      ($s.mechanical < 0.8 and $s.high_stakes < 0.8 and $escalate == "")
    end) as $score_axes_relevant
+| (if ($s != null
+       and $htier == null
+       and (($confirmed | index("difficulty")) == null)
+       and $score_axes_relevant
+       and $s.difficulty.confidence < 0.9
+       and $diff_pivotal)
+   then ["difficulty"] else [] end) as $auto_decided
 | (if ($s == null or $htier != null) then [] else
      [ (if ($s.high_stakes <= 0.2 or $s.high_stakes >= 0.8) then empty else "high_stakes" end),
        (if ($s.difficulty.score >= 3.2 and ($s.splittable > 0.2 and $s.splittable < 0.8)) then "splittable" else empty end),
        (if ($s.mechanical <= 0.2 or $s.mechanical >= 0.8) then empty else "mechanical" end),
-       (if ($score_axes_relevant and $s.difficulty.confidence < 0.9 and $diff_pivotal) then "difficulty" else empty end),
        (if ($score_axes_relevant and $s.regression.confidence < 0.9 and $reg_pivotal) then "regression" else empty end),
        (if ($tier_settled | not)
            and (($tier_gap >= 2) or ($tier_gap == 1 and $s.tier.confidence < 0.9))
@@ -397,7 +403,6 @@ def abs: if . < 0 then -. else . end;
           elif $reason == "high_stakes" then "この変更は重要・高リスク扱いにしますか?"
           elif $reason == "splittable" then "レビュー可能な独立単位に分割して複数回で委任できますか?"
           elif $reason == "mechanical" then "この作業は挙動不変の機械的な作業(move-only・rename・整形)ですか?"
-          elif $reason == "difficulty" then "難度の判定が確信に欠けます(score=\($s.difficulty.score)・confidence=\($s.difficulty.confidence))。難度を指定してください。"
           elif $reason == "regression" then "退行時の被害の判定が確信に欠けます(score=\($s.regression.score)・confidence=\($s.regression.confidence))。被害度を指定してください。"
           elif $reason == "tier" then
             (if $tier_gap >= 2
@@ -412,7 +417,6 @@ def abs: if . < 0 then -. else . end;
           elif $reason == "high_stakes" then ["高リスク扱いにする","通常扱いにする"]
           elif $reason == "splittable" then ["分割する","分割しない"]
           elif $reason == "mechanical" then ["機械的な作業として扱う","通常の実装として扱う"]
-          elif $reason == "difficulty" then ["0","1","2","3","4"]
           elif $reason == "regression" then ["0","1","2","3"]
           elif $reason == "tier" or $reason == "fallback_confirm" then ["luna","terra","sol","astra"]
           elif $budget.over then ["Sol で代替(推奨)","分割して Terra","超過を承知で Astra を使う"]
@@ -438,7 +442,8 @@ def abs: if . < 0 then -. else . end;
    recommend: {model: ($rec.tier | model_of), effort: $rec.effort},
    advice: $rec.advice,
    gate: $gate, unattended: $unattended,
-   open: $open, confirmed_axes: $confirmed, rules_applied: $rules,
+   open: $open, auto_decided: $auto_decided,
+   confirmed_axes: $confirmed, rules_applied: $rules,
    signals: $signals, human_facts: $facts,
    astra_candidate: $r2.cand, astra_approved: ($ap == true),
    features: $features, budget: $budget, ts: $ts}
@@ -464,6 +469,9 @@ printf '%s\n' "$RECORD"
 G="$(printf '%s' "$RECORD" | jq -r '.gate')"
 R="$(printf '%s' "$RECORD" | jq -r '.recommend.model + "/" + .recommend.effort')"
 echo "delegate-route: route_id $ROUTE_ID / round $ROUND / gate $G / 推奨 $R" >&2
+if [ "$(printf '%s' "$RECORD" | jq -r '.auto_decided | index("difficulty") != null')" = "true" ]; then
+  printf '%s' "$RECORD" | jq -r '"delegate-route: 自動採用: difficulty(score=\(.signals.difficulty.score) / confidence=\(.signals.difficulty.confidence))"' >&2
+fi
 if [ "$G" != "confirmed" ]; then
   printf '%s' "$RECORD" | jq -r '.open[] | "  [\(.axis)/\(.reason)]\(if .must_decide then "(must_decide)" else "" end) \(.question)"' >&2
   echo "  回答後: delegate-route --route-id $ROUTE_ID --human-facts '{…}' で再判定する" >&2

@@ -151,6 +151,7 @@ jq -s 'map(select(.human_facts != null)) | group_by(.route_id) | map(last) |
 
 - 同じ内容軸(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision`)に質問が 3 件以上偏ったら、`templates.md`「1. 実装指示書」の必須項目へ昇格して質問の発生源を断つ
 - 人間回答との一致率が高い軸は確定域の閾値(0.2 / 0.8、confidence 0.9)を緩める根拠、低い軸は判定依頼書(`templates.md`「4.」)の質問文を直す根拠。閾値の変更は「同じ軸で 3 件以上」の規律に従う
+- 難度の自動採用(0.26.1): `auto_decided` に `difficulty` が入った route の件数と、その委任の `cause:"model"` 率を見る(`jq -s '[.[] | select((.auto_decided // []) | index("difficulty"))] | group_by(.route_id) | length' "$LOG_DIR/route-decisions.jsonl"`)。低確信の難度をそのまま使って下位ティアへ落とした害が偏って出たら(同じ組で 3 件以上)、決定式のしきい値か判定依頼書の難度レベルの記述を見直す — 質問へは戻さない(ユーザー方針 2026-09-20: 難度は人間に聞かず自己判断)
 - 効果測定: 質問を経た委任と経ない委任の `cause:"instruction"` 率、推奨どおり下位ティアで走らせた委任の `cause:"model"` 率(基準: Terra medium 10%・high 21%)、`--force-astra` による Astra 強行の件数(`runs.jsonl` の `astra_forced`)
 - 判定者の確率は較正されていない(Claude サブエージェント)。Jev 等へ差し替えたら、差し替え前後で一致率を比較する
 

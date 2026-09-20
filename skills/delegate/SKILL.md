@@ -141,7 +141,8 @@ Codex へ実装・調査を委任する前に、「修正内容」と「対応�
 2. **route**: `bin/delegate-route --instruction <指示書> --kind <実装|調査> --signals "$(cat signals.json)"`(連作なら `--series-key <キー>`、下位ティアが `cause:"model"` で 2 回失敗した後の昇格なら `--escalate-from <run_id>`)。出力の `gate` を見る
 3. **`ask_human` なら人間に聞く**: `open[]` の質問を AskUserQuestion で聞く。1 回に最大 4 問、順序は `open[]` の並び(内容 → 重要度・分割 → ティア → Astra 承認)。質問文は雛形なので、判定者の `notes` と指示書の該当箇所を引いて**具体化**してから聞く(例:「上限件数を超えたときの挙動が指示書にありません。切り捨て / エラー / ページング のどれにしますか?」)
    - **内容軸**(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision` / `ambiguity`)の回答は**指示書へ反映**し、判定者に判定し直させてから `--route-id <id> --signals <新> --human-facts '{"instruction_changed":true}'` で再判定する(委任先が読むのは指示書だけのため、facts だけで済ませない。判定者に前回の結果は見せない)
-   - **モデル軸**の回答は `--human-facts` で渡す(`high_stakes` / `splittable` / `mechanical` は true/false、`difficulty` / `regression` は数値、`tier` は luna|terra|sol|astra)。人間の回答は判定者の信号より常に優先され、答えた軸は再質問されない
+   - **モデル軸**の回答は `--human-facts` で渡す(`high_stakes` / `splittable` / `mechanical` は true/false、`regression` は数値、`tier` は luna|terra|sol|astra)。人間の回答は判定者の信号より常に優先され、答えた軸は再質問されない
+   - **難度(`difficulty`)は人間に聞かない**。指示書から見積もれる技術的な量なので、判定者の値をそのまま採用する(確信が低くしきい値付近だった場合は出力の `auto_decided` に記録される)。司令塔が判定者の値を明らかな誤りと判断した場合だけ `--human-facts '{"difficulty":<0〜4>,"delegated_to_commander":["difficulty"]}'` で上書きし、委任ログの `note` に理由を書く。高く見誤って最上位モデルの候補になっても人間の承認で止まり、低く見誤って失敗したら昇格ルート(`--escalate-from`)で回収する
    - **Astra の承認**(`astra_approval`)は、信号が確定域でも毎回人間に聞く。回答は `astra_approved` の true/false。「分割して Terra」を選ばれたら、タスクを分割して指示書を作り直す。司令塔が自分の判断で `astra_approved:true` を入れない
    - `must_decide:true` の質問は、判定者の再判定を待たず人間の回答をそのまま facts に入れて確定させる。人間が「任せる」と答えた軸は司令塔が決めて `delegated_to_commander` に軸名を入れる
    - 連作で「このシリーズは以後同じ扱い」と答えられたら `series_apply:true` を足す(保持されるのはモデル軸だけ・24 時間。内容軸と Astra 承認は毎回判定する)
