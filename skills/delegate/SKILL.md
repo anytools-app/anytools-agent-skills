@@ -138,19 +138,24 @@ Claude Code が決めてよい(技術判断):
 Codex へ実装・調査を委任する前に、「修正内容」と「対応モデル」の両方を確定させる。質問の回数に上限は置かない(ユーザー方針 2026-09-19)— 不確かなまま安い側へ倒して走らせるより、聞いて確定させる。Grok / Antigravity / Claude サブエージェントへの委任と、相談・レビューは対象外(ティアは各 adapter の表で決める)。
 
 1. **判定**: `templates.md`「4. ティア判定依頼書」を、読み取り専用の Claude サブエージェント(`model: sonnet`)に渡す。渡すのは依頼書と指示書だけ(ブラインド: 司令塔の推奨ティア・予算残量・会話の経緯は渡さない)。返ってきた JSON から `notes` を除いて signals ファイルにする
-2. **route**: `bin/delegate-route --instruction <指示書> --kind <実装|調査> --signals "$(cat signals.json)"`(連作なら `--series-key <キー>`、下位ティアが `cause:"model"` で 2 回失敗した後の昇格なら `--escalate-from <run_id>`)。出力の `gate` を見る
-3. **`ask_human` なら人間に聞く**: `open[]` の質問を AskUserQuestion で聞く。1 回に最大 4 問、順序は `open[]` の並び(内容 → 重要度・分割 → ティア → Astra 承認)。質問文は雛形なので、判定者の `notes` と指示書の該当箇所を引いて**具体化**してから聞く(例:「上限件数を超えたときの挙動が指示書にありません。切り捨て / エラー / ページング のどれにしますか?」)
+2. **route**: `bin/delegate-route --instruction <指示書> --kind <実装|調査> --signals "$(cat signals.json)"`(連作なら `--series-key <キー>`、下位ティアが `cause:"model"` で 2 回失敗した後の昇格なら `--escalate-from <run_id>[,<run_id>]`。昇格は委任ログで検証され、Terra / Sol の `cause:"model"` の失敗が合計 2 回(`resumes` を含む)に満たない、または原因が `instruction` / `environment` / `tooling` 等のときは exit 2 で拒否される — 昇格でなく原因分類へ戻る)。出力の `gate` は `confirmed` / `gather_context` / `ask_human` / `fallback` / `unavailable` の 5 値
+2.5. **`gather_context` なら司令塔が補う**: `open[]` のうち `resolution:"gather"`(対象範囲 `scope_defined`・完了条件 `done_defined`)は人間に聞かず、リポジトリ・`git status`・ベースライン計測から司令塔が指示書に補い、判定者に判定し直させて `--route-id <id> --signals <新> --human-facts '{"instruction_changed":true}'` で再判定する。同じ軸が 2 ラウンド続けて未確定なら `must_decide` になり、人間への質問(`resolution:"ask"`)に変わる
+3. **`ask_human` なら人間に聞く**: `open[]` のうち `resolution:"ask"` の質問を AskUserQuestion で聞く。1 回に最大 4 問、順序は `open[]` の並び(内容 → 重要度・被害度・分割・機械的か → Astra 承認)。質問文は雛形なので、判定者の `notes` と指示書の該当箇所を引いて**具体化**してから聞く(例:「上限件数を超えたときの挙動が指示書にありません。切り捨て / エラー / ページング のどれにしますか?」)
    - **内容軸**(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision` / `ambiguity`)の回答は**指示書へ反映**し、判定者に判定し直させてから `--route-id <id> --signals <新> --human-facts '{"instruction_changed":true}'` で再判定する(委任先が読むのは指示書だけのため、facts だけで済ませない。判定者に前回の結果は見せない)
-   - **モデル軸**の回答は `--human-facts` で渡す(`high_stakes` / `splittable` / `mechanical` は true/false、`regression` は数値、`tier` は luna|terra|sol|astra)。人間の回答は判定者の信号より常に優先され、答えた軸は再質問されない
+   - **モデル軸**の回答は `--human-facts` で渡す(`high_stakes` / `splittable` / `mechanical` は true/false、`regression` は数値)。人間の回答は判定者の信号より常に優先され、答えた軸は再質問されない
+   - **ティアそのものは人間に聞かない**(ユーザー方針 2026-09-22)。人間に聞くのは判定の材料(重要・高リスクか、退行時の被害、分割できるか、機械的か)だけで、ティアは材料から決定式が決める。判定者のティア候補と決定式の推奨が割れても「どちらにしますか」とは聞かず、割れの原因になりうる材料軸のうち未確定のものを聞く。材料が確定していれば決定式を採用し、割れは出力の `tier_disagreement` に記録される(見直しの材料)。`--human-facts '{"tier":"…"}'` は人間が自発的に明示指定する場合と司令塔の override 専用で、質問の答えとしては使わない
    - **難度(`difficulty`)は人間に聞かない**。指示書から見積もれる技術的な量なので、判定者の値をそのまま採用する(確信が低くしきい値付近だった場合は出力の `auto_decided` に記録される)。司令塔が判定者の値を明らかな誤りと判断した場合だけ `--human-facts '{"difficulty":<0〜4>,"delegated_to_commander":["difficulty"]}'` で上書きし、委任ログの `note` に理由を書く。高く見誤って最上位モデルの候補になっても人間の承認で止まり、低く見誤って失敗したら昇格ルート(`--escalate-from`)で回収する
    - **Astra の承認**(`astra_approval`)は、信号が確定域でも毎回人間に聞く。回答は `astra_approved` の true/false。「分割して Terra」を選ばれたら、タスクを分割して指示書を作り直す。司令塔が自分の判断で `astra_approved:true` を入れない
    - `must_decide:true` の質問は、判定者の再判定を待たず人間の回答をそのまま facts に入れて確定させる。人間が「任せる」と答えた軸は司令塔が決めて `delegated_to_commander` に軸名を入れる
    - 連作で「このシリーズは以後同じ扱い」と答えられたら `series_apply:true` を足す(保持されるのはモデル軸だけ・24 時間。内容軸と Astra 承認は毎回判定する)
 4. **`confirmed` になったら** `recommend` の model / effort で `delegate-run` を実行し、`--route-id <id>` を必ず付ける。**機械的に強制されるのは最上位モデルだけ**(`delegate-run` が、承認済み route・指示書の内容一致・effort・承認の未使用を実行前に検査する。`adapters/codex.md`)。それ以外のティアの `--route-id` は監査用の記録で、手順を守るのは司令塔の規律。承認は指示書の内容に紐付き、その内容での新規実行 1 回で消費される — 承認後に指示書を直したら判定し直して同じ route で再承認を取り、同じ承認で別の委任を走らせない(同一セッションの resume は可)。推奨と違うティアで走らせるなら、委任ログの `note` に `route:override(<理由>)` を書く
 5. **ユーザー不在で確定できないときは委任を開始しない**。自動ループ等で、推奨が Astra 以外かつ内容軸が確定済みの場合に限り `--allow-unattended` を使ってよい
-6. **`fallback`**(signals を用意できないとき)は静的ルールの推奨が出るだけなので、司令塔が内容の 4 観点(対象範囲・挙動・完了条件・製品判断)を自己点検したうえで、ティアを人間に確認して `--human-facts '{"tier":"…"}'` で確定する
+6. **`fallback`**(signals を用意できないとき)は内容軸を判定できないので、司令塔が内容の 4 観点(対象範囲・挙動・完了条件・製品判断)を自己点検する。モデル軸は `open[]` に出る材料の質問(機械的か・重要・高リスクか・退行時の被害)を人間に聞き、`--human-facts` で渡して決定式に決めさせる(ティアそのものは聞かない。難度は不明なので terra/medium 相当の既定から、材料で luna / sol / Astra 候補へ動く)
+7. **`unavailable`**(推奨ティアのモデルが台帳 `models.json` で `available` でない)は委任を開始しない。台帳を更新するか、`--human-facts '{"tier":"…"}'` で別のティアを指定する(必須条件を緩めて別モデルへ黙って置き換えない)
 
 - Astra の使用条件・週予算・強行フラグは `adapters/codex.md`「Astra の使用条件と週予算」。残量は `delegate-route --budget`
+- **モデル ID・対応 effort・運用で許す effort・可用性の正は `models.json`(台帳)**。判定結果には台帳の `ledger_version` と決定式の `policy_version` が残り、同じ入力・台帳・facts なら同じ判定になる。モデルの差し替え・切り戻しは台帳の更新だけで行い、判定コードは変えない。`adapters/codex.md` のモデル表は用途の説明で、値が食い違えば台帳が正。ティアの決定と effort の決定は別の段で行われ(effort は台帳の `default_effort` を起点に信号で上げ、`efforts_allowed` に無ければ丸める)、`delegate-run` は台帳の `efforts_supported` に無い effort を実行前に拒否する
+- 判定結果の `alternatives` は評価用の比較候補(隣接ティア・effort を 1 件)で、実行はしない。実際の選択との対照は `lessons.md`「ティア判定(delegate-route)の見直し指標」
 - 委任ログの `note` 先頭に選定経路を残す: `route:confirmed`(質問なしで確定)/ `route:human(<ラウンド数>)` / `route:override(<理由>)` / `route:fallback`。判定そのものは委任ログに記録しない(`route-decisions.jsonl` が持つ)
 - 判定者の確率は較正されていない。質問が特定の軸に偏る・人間の回答と食い違う場合の調整は `lessons.md`「ティア判定(delegate-route)の見直し指標」
 

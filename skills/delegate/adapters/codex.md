@@ -4,6 +4,8 @@
 
 ## モデル表(GPT-5.6 主系統 + GPT-6 Astra は「ここ一番」限定 / 2026-09-19 改定)
 
+> モデル ID・対応 effort(`efforts_supported`)・運用で許す effort(`efforts_allowed`)・可用性(`status`)の**正は `../models.json`(台帳、0.27.0)**。この表は用途の説明で、値が食い違えば台帳が正。`delegate-route` は台帳からモデルを解決し、`delegate-run` は台帳の `efforts_supported` に無い effort(例: Luna の `ultra`)を実行前に拒否する。モデルの追加・退役・effort の変更は台帳の `ledger_version` を上げて行う。
+
 通常実装は GPT-5.6 ファミリ(Terra / Luna)、難所は Sol を主系統とし、GPT-6 Astra は週予算つきの「ここ一番」に限る(下記「Astra の使用条件と週予算」)。各モデルの位置づけの根拠: 公式モデルページ https://learn.chatgpt.com/docs/models (旧 https://developers.openai.com/codex/models から 308 リダイレクト)は Astra を「Our most capable model for complex work across code, apps, and research」と位置づけ、複数ステップ・複数ツールにまたがる持続的な推論と判断を要する end-to-end のワークフロー向けとしている。Sol は「ambiguous, difficult, or high-value」、Terra は日常作業の自然な起点、Luna は成功条件が明確な高頻度作業という位置づけを維持している。
 
 手元の `~/.codex/models_cache.json` (`fetched_at`: 2026-09-04 / client 0.153.0)で Astra・Sol・Terra・Luna が `visibility:"list"` に含まれることを確認済み。codex 0.153.2 で `codex exec --sandbox read-only -m gpt-6-astra -c 'model_reasoning_effort="low"'` の疎通を実測済み(exit 0、リポジトリのファイルも実読)。Astra の supported effort は `low` / `medium` / `high` / `xhigh` / `max` / `ultra`、default は `medium`。

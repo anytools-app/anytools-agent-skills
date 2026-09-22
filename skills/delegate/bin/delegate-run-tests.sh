@@ -3,6 +3,8 @@
 # すべて --dry-run(または引数エラー)で完結し、実際の CLI 呼び出しは行わない。
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)/delegate-run"
+MODELS_FILE="$(dirname "$BIN")/../models.json"
+unset DELEGATE_MODELS_FILE
 PASS=0; FAIL=0
 
 # 隔離環境(環境変数は skill の .env より優先されるので、実 .env があってもテストは隔離される)
@@ -60,6 +62,88 @@ assert_not_contains "codex resume: --last 不使用"   "--last"
 # ── Codex: effort 未指定はエラー(config デフォルト依存の禁止) ──
 run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_exit "codex effort 必須" 2
+
+# ── Codex: 台帳の supported を検査(route の allowed と独立)──
+run "$BIN" --dry-run --cli codex --mode write --model gpt-6-astra --effort none --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳 effort: Astra none は exit 2" 2
+assert_contains "台帳 effort: Astra route 検査より先に拒否" "effort none は gpt-6-astra が対応していない"
+assert_contains "台帳 effort: supported を表示" '["low","medium","high","xhigh","max","ultra"]'
+assert_not_contains "台帳 effort: route の案内まで進まない" "--route-id が必要"
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --effort none --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳 effort: force-astra でも未対応 effort は拒否" 2
+run "$BIN" --dry-run --cli codex --mode readonly --model gpt-5.6-luna --effort ultra --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳 effort: Luna ultra は拒否" 2
+assert_contains "台帳 effort: Luna の理由" "effort ultra は gpt-5.6-luna が対応していない"
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort xhigh --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳 effort: Terra xhigh は supported なので通る" 0
+assert_contains "台帳 effort: xhigh を透過" 'model_reasoning_effort=\"xhigh\"'
+run "$BIN" --dry-run --cli codex --mode readonly --model gpt-5.3-codex-spark --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳 effort: 台帳に無いモデルは従来どおり通る" 0
+run env DELEGATE_MODELS_FILE=/nonexistent "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 不存在は拒否" 2
+assert_contains "台帳: 不存在の理由" "モデル台帳が存在しない: /nonexistent"
+run env DELEGATE_MODELS_FILE=/nonexistent "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 必須引数の検査が先" 2
+assert_contains "台帳: effort 必須を先に表示" "codex は --effort 必須"
+BAD_LEDGER="$TMP/bad-models.json"
+for INVALID_JSON in '{' '' 'null' '[]' '{} {}'; do
+  printf '%s\n' "$INVALID_JSON" > "$BAD_LEDGER"
+  run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+  assert_exit "台帳: JSON オブジェクトでない入力を拒否($INVALID_JSON)" 2
+  assert_contains "台帳: JSON 不正の理由" "JSON オブジェクトとして解析できない"
+done
+jq 'del(.tiers.terra)' "$MODELS_FILE" > "$BAD_LEDGER"
+run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: tier 欠落も route と同じく拒否" 2
+jq '.tiers.terra.model = "missing-model"' "$MODELS_FILE" > "$BAD_LEDGER"
+run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: models に無い tier.model を拒否" 2
+
+# high が部分一致する文字列でも、台帳の配列型検査で先に拒否する。
+for FIELD_PATH in '["tiers","terra","efforts_allowed"]' '["models","gpt-5.6-terra","efforts_supported"]'; do
+  FIELD="$(printf '%s' "$FIELD_PATH" | jq -r 'join(".")')"
+  for INVALID_VALUE in '"lowmediumhigh"' '[]' '["medium",1]' 'null' '{}'; do
+    jq --argjson path "$FIELD_PATH" --argjson value "$INVALID_VALUE" 'setpath($path; $value)' "$MODELS_FILE" > "$BAD_LEDGER"
+    run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+    assert_exit "台帳: $FIELD の不正な配列を拒否($INVALID_VALUE)" 2
+    assert_contains "台帳: 配列の違反項目と理由" "モデル台帳が不正: $FIELD: 1 件以上の文字列配列が必要"
+  done
+done
+for FIELD_PATH in '["ledger_version"]' '["tiers","sol","default_effort"]' '["models","gpt-5.5","status"]'; do
+  FIELD="$(printf '%s' "$FIELD_PATH" | jq -r 'join(".")')"
+  for INVALID_VALUE in 'null' '1' '[]'; do
+    jq --argjson path "$FIELD_PATH" --argjson value "$INVALID_VALUE" 'setpath($path; $value)' "$MODELS_FILE" > "$BAD_LEDGER"
+    run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+    assert_exit "台帳: $FIELD の文字列以外を拒否($INVALID_VALUE)" 2
+    assert_contains "台帳: 文字列の違反項目と理由" "モデル台帳が不正: $FIELD: 文字列が必要"
+  done
+done
+for DEFAULT_EFFORT in low med; do
+  jq --arg effort "$DEFAULT_EFFORT" '.tiers.terra.default_effort = $effort' "$MODELS_FILE" > "$BAD_LEDGER"
+  run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+  assert_exit "台帳: allowed に無い default_effort を拒否($DEFAULT_EFFORT)" 2
+  assert_contains "台帳: default_effort の包含関係の理由" "モデル台帳が不正: tiers.terra.default_effort: efforts_allowed に含まれていない"
+done
+jq '.models["gpt-5.5"] = false' "$MODELS_FILE" > "$BAD_LEDGER"
+run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 実行対象以外の model も検証する" 2
+assert_contains "台帳: model 自体の型も項目名つきで拒否" "モデル台帳が不正: models.gpt-5.5: オブジェクトが必要"
+jq '.tiers.extra = {model:"gpt-5.6-terra",efforts_allowed:"medium",default_effort:"medium"}' "$MODELS_FILE" > "$BAD_LEDGER"
+run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 必須 4 ティア以外も検証する" 2
+assert_contains "台帳: 追加ティアの違反項目" "モデル台帳が不正: tiers.extra.efforts_allowed: 1 件以上の文字列配列が必要"
+jq '.ledger_version = false | .models["gpt-5.6-terra"].efforts_supported = "lowmediumhigh"' "$MODELS_FILE" > "$BAD_LEDGER"
+run env DELEGATE_MODELS_FILE="$BAD_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 複数違反も exit 2" 2
+[ "$OUT" = "delegate-run: ERROR: モデル台帳が不正: ledger_version: 文字列が必要" ] && ok || ng "台帳: 最初の違反だけを 1 行で表示する"
+
+CUSTOM_LEDGER="$TMP/custom models.json"
+jq '.models["gpt-5.6-terra"].efforts_supported = ["medium"]' "$MODELS_FILE" > "$CUSTOM_LEDGER"
+run env DELEGATE_MODELS_FILE="$CUSTOM_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 環境変数の差し替えた supported を使う" 2
+assert_contains "台帳: 差し替えた supported の値" 'efforts_supported: ["medium"]'
+run env DELEGATE_MODELS_FILE="$CUSTOM_LEDGER" "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "台帳: 差し替えた supported の許容値は通る" 0
 
 # ── Grok: sandbox と yolo は必ずセット・フルパス・json 出力 ──
 run "$BIN" --dry-run --cli grok --mode readonly --effort medium --cd "$NONGIT" --prompt-file "$PROMPT"
@@ -186,6 +270,7 @@ assert_contains "log dir: 環境変数が反映" "$TMP/logs/runs/"
 
 FAKESKILL="$TMP/fakeskill"; mkdir -p "$FAKESKILL/bin"
 cp "$BIN" "$FAKESKILL/bin/delegate-run"
+cp "$MODELS_FILE" "$FAKESKILL/models.json"
 echo "DELEGATE_LOG_DIR=$TMP/envfile-logs" > "$FAKESKILL/.env"
 run env -u DELEGATE_LOG_DIR "$FAKESKILL/bin/delegate-run" --dry-run --cli codex --mode write --model m --effort e --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_contains "log dir: .env フォールバック" "$TMP/envfile-logs/runs/"
