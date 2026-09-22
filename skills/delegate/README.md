@@ -14,7 +14,7 @@ Turns Claude Code into an **orchestrator** which safely delegates implementation
 - Japanese writing and proofreading → **Antigravity (Gemini Flash)**
 - cheap pre-design code reading → **Claude subagents**
 
-Every delegation goes through an auditable loop: baseline measurement → written instruction → sandboxed execution via `bin/delegate-run` → file-manifest cross-check → full diff review → one-line JSONL log entry. Rate-limited CLIs are recorded as cooldowns and rejected before execution instead of being retried every time. Before a Codex delegation, `bin/delegate-route` turns an independent judge's typed signals into a recommended model tier, enforces a weekly budget on the top-tier model (each use needs explicit human approval), and keeps asking the human until both the change itself and the tier are settled.
+Every delegation goes through an auditable loop: baseline measurement → written instruction → sandboxed execution via `bin/delegate-run` → file-manifest cross-check → full diff review → one-line JSONL log entry. Rate-limited CLIs are recorded as cooldowns and rejected before execution instead of being retried every time. Before a Codex delegation, `bin/delegate-route` turns an independent judge's typed signals into a recommended model tier, enforces a weekly budget on the top-tier model (each use needs explicit human approval), and keeps asking the human for the *facts* the decision needs (stakes, blast radius, splittability) until both the change itself and the tier are settled — the tier itself is never asked directly. Model IDs, supported efforts and availability live in a versioned ledger (`models.json`) so models can be swapped or rolled back without touching the decision code.
 
 ## Setup
 

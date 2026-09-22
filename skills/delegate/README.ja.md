@@ -97,6 +97,7 @@ skills/delegate/
 │   ├── grok.md
 │   └── antigravity.md
 ├── templates.md      # 実装指示書・詳細設計ドラフト依頼・独立レビュー依頼
+├── models.json       # モデル台帳(ティア→モデル ID・対応 effort・可用性・確認日。判定と effort 検査の正)
 ├── lessons.md        # 事故例・実測記録・ログ見直しの昇格条件
 ├── bin/
 │   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown・Astra ゲート)

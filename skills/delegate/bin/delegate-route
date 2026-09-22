@@ -8,7 +8,7 @@
 # 使い方:
 #   delegate-route --budget
 #   delegate-route --instruction <file> --kind <実装|調査|相談|レビュー> [--signals <json>]
-#     [--series-key <key>] [--escalate-from <run_id>] [--allow-unattended]
+#     [--series-key <key>] [--escalate-from <run_id[,run_id...]>] [--allow-unattended]
 #   delegate-route --route-id <id> [--signals <json>] [--human-facts <json>]   # 再判定(ラウンド+1)
 #   delegate-route --show <route_id>                                          # 最新ラウンドの行を表示
 #
@@ -21,8 +21,11 @@ set -u
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
 ENV_LOG_DIR="${DELEGATE_LOG_DIR:-}"
+ENV_MODELS_FILE="${DELEGATE_MODELS_FILE:-}"
 [ -f "$SKILL_DIR/.env" ] && { set -a; . "$SKILL_DIR/.env"; set +a; }
 LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}}"
+MODELS_FILE="${ENV_MODELS_FILE:-${DELEGATE_MODELS_FILE:-$SKILL_DIR/models.json}}"
+ROUTE_POLICY_VERSION="0.27.0"
 DECISIONS="$LOG_DIR/route-decisions.jsonl"
 SERIES_FILE="$LOG_DIR/route-series.json"
 DELEGATION_LOG="$LOG_DIR/delegation-log.jsonl"
@@ -168,7 +171,7 @@ while [ $# -gt 0 ]; do
     --kind) KIND="${2:?}"; shift 2 ;;
     --signals) SIGNALS="${2:?}"; HAVE_SIGNALS=1; shift 2 ;;
     --series-key) SERIES_KEY="${2:?}"; shift 2 ;;
-    --escalate-from) ESCALATE="${2:?}"; shift 2 ;;
+    --escalate-from) ESCALATE="${2:-}"; [ -n "$ESCALATE" ] || die "escalate-from に run_id が無い"; shift 2 ;;
     --route-id) ROUTE_ID="${2:?}"; shift 2 ;;
     --human-facts) FACTS="${2:?}"; HAVE_FACTS=1; shift 2 ;;
     --allow-unattended) ALLOW_UNATTENDED=1; shift ;;
@@ -227,6 +230,61 @@ case "$INSTRUCTION" in /*) ;; *) INSTRUCTION="$(cd "$(dirname "$INSTRUCTION")" 2
 INSTRUCTION_SHA256="$(sha256_file "$INSTRUCTION")"
 [ -n "$INSTRUCTION_SHA256" ] || die "指示書の SHA-256 を計算できない: $INSTRUCTION"
 
+# ── モデル台帳(埋め込み値へのフォールバックはしない)──
+[ -f "$MODELS_FILE" ] || die "モデル台帳が存在しない: $MODELS_FILE"
+LEDGER="$(jq -ces 'if length == 1 then .[0] | select(type == "object") else empty end' \
+  "$MODELS_FILE" 2>/dev/null)" || die "モデル台帳が JSON オブジェクトとして解析できない: $MODELS_FILE"
+LEDGER_ERRORS="$(printf '%s' "$LEDGER" | jq -r '
+  def nonempty_strings:
+    if type != "array" then false else length > 0 and all(.[]; type == "string") end;
+  first(
+    if (.models | type) != "object" then "models: オブジェクトが必要"
+    elif (.tiers | type) != "object" then "tiers: オブジェクトが必要"
+    elif (.ledger_version | type) != "string" then "ledger_version: 文字列が必要"
+    else . as $ledger
+      | ((["luna","terra","sol","astra"][] as $tier
+          | select($ledger.tiers | has($tier) | not)
+          | "tiers.\($tier): 必須項目が無い"),
+         ($ledger.tiers | to_entries[] | .key as $tier | .value as $config
+          | if ($config | type) != "object" then "tiers.\($tier): オブジェクトが必要"
+            elif ($config.model | type) != "string" then "tiers.\($tier).model: 文字列が必要"
+            elif ($ledger.models | has($config.model) | not) then "tiers.\($tier).model: models に無い: \($config.model)"
+            elif ($config.efforts_allowed | nonempty_strings | not) then "tiers.\($tier).efforts_allowed: 1 件以上の文字列配列が必要"
+            elif ($config.default_effort | type) != "string" then "tiers.\($tier).default_effort: 文字列が必要"
+            elif ($config.efforts_allowed | index($config.default_effort)) == null then "tiers.\($tier).default_effort: efforts_allowed に含まれていない"
+            else empty end),
+         ($ledger.models | to_entries[] | .key as $model | .value as $config
+          | if ($config | type) != "object" then "models.\($model): オブジェクトが必要"
+            elif ($config.efforts_supported | nonempty_strings | not) then "models.\($model).efforts_supported: 1 件以上の文字列配列が必要"
+            elif ($config.status | type) != "string" then "models.\($model).status: 文字列が必要"
+            else empty end))
+    end)')" || die "モデル台帳が不正: schema: 検証できない"
+[ -z "$LEDGER_ERRORS" ] || die "モデル台帳が不正: $LEDGER_ERRORS"
+
+# ── 昇格元の検証(再判定でも引き継いだ run_id を毎回検証する)──
+if [ -n "$ESCALATE" ]; then
+  ESCALATION_LOG="$DELEGATION_LOG"
+  [ -f "$ESCALATION_LOG" ] || ESCALATION_LOG=/dev/null
+  ESCALATION_ERROR="$(jq -Rn --arg ids "$ESCALATE" --argjson ledger "$LEDGER" '
+    [inputs | fromjson? | select(type == "object")] as $rows
+    | ($ids | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | unique) as $ids
+    | [$ids[] as $id | select(any($rows[]; .run_id == $id) | not) | $id] as $missing
+    | [$rows[] | .run_id as $id | select(($ids | index($id)) != null)] as $matches
+    | [$matches[] | select(.cause != "model")] as $bad_causes
+    | [$matches[] | select(.model != $ledger.tiers.terra.model and .model != $ledger.tiers.sol.model)] as $bad_models
+    | if ($ids | length) == 0 then "escalate-from に run_id が無い"
+      elif ($missing | length) > 0 then "escalate-from の run_id が委任ログに無い: \($missing[0])"
+      elif ($bad_causes | length) > 0 then $bad_causes[0]
+        | "昇格の条件を満たさない: \(.run_id) は cause=\(.cause)。昇格でなく原因分類へ戻る(instruction→指示書修正 / environment・tooling→環境・CLI の回復 / spec_change・product_decision→設計・製品判断 / unknown→証拠取得)"
+      elif ($bad_models | length) > 0 then $bad_models[0]
+        | "昇格元は Terra / Sol の委任に限る: \(.run_id) は model=\(.model)"
+      else ($matches | map(1 + (.resumes // 0)) | add // 0) as $failures
+        | if $failures < 2 then "昇格には同一タスクで Terra / Sol が cause:model で 2 回失敗していることが必要(現在 \($failures) 回)"
+          else empty end
+      end' "$ESCALATION_LOG")" || die "昇格元の委任ログを検証できない"
+  [ -z "$ESCALATION_ERROR" ] || die "$ESCALATION_ERROR"
+fi
+
 # ── signals / human_facts の検証とマージ ──
 if [ "$HAVE_SIGNALS" -eq 1 ]; then
   validate_signals "$SIGNALS"
@@ -279,15 +337,23 @@ RECORD="$(jq -cn \
   --arg series_key "$SERIES_KEY" --arg escalate "$ESCALATE" \
   --arg ts "$(iso_now)" --argjson unattended_flag "$ALLOW_UNATTENDED" \
   --argjson signals "$SIGNALS_ARG" --argjson facts "$FACTS_MERGED" \
+  --arg policy_version "$ROUTE_POLICY_VERSION" --argjson ledger "$LEDGER" \
   --argjson budget "$BUDGET" --argjson features "$FEATURES" --argjson prev_opens "$PREV_OPENS" '
 
 def tiernum: {"luna":0,"terra":1,"sol":2,"astra":3}[.];
-def model_of: {"luna":"gpt-5.6-luna","terra":"gpt-5.6-terra","sol":"gpt-5.6-sol","astra":"gpt-6-astra"}[.];
 def mtok: (. / 1000000 * 10 | floor) / 10;
 def abs: if . < 0 then -. else . end;
 
 ["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision"] as $nouls
-| (if $signals == null then null else
+| (if $signals == null then
+     # 3 軸の回答が揃うまでは静的な暫定推奨を維持する。内容軸は評価しない。
+     (if ($facts | has("mechanical") and has("high_stakes") and has("regression")) then
+        {mechanical: (if $facts.mechanical then 1.0 else 0.0 end),
+         high_stakes: (if $facts.high_stakes then 1.0 else 0.0 end),
+         regression: {score: $facts.regression, confidence: 1.0},
+         difficulty: {score: 1.0, confidence: 1.0}, splittable: 0.5}
+      else null end)
+   else
      ($signals
       | reduce $nouls[] as $k (.; if ($facts|has($k)) then .[$k] = (if $facts[$k] then 1.0 else 0.0 end) else . end)
       | reduce ("difficulty","regression","ambiguity") as $k (.;
@@ -296,45 +362,70 @@ def abs: if . < 0 then -. else . end;
 | ($facts.tier // null) as $htier
 | ($features.risk_terms | length > 0) as $risky
 
-# ── 決定式による推奨 ──
+# ── 決定式による推奨ティア(effort は後段で決める)──
 | (if $s == null then
-     (if $risky then {tier:"sol", effort:"high", advice:null, cand:false}
-      else {tier:"terra", effort:"medium", advice:null, cand:false} end)
+     (if $risky then {tier:"sol", advice:null, cand:false}
+      else {tier:"terra", advice:null, cand:false} end)
    elif $s.mechanical >= 0.8 then
-     (if $features.scope_files > 5 then {tier:"terra", effort:"medium", advice:null, cand:false}
-      else {tier:"luna", effort:"medium", advice:null, cand:false} end)
-   elif $s.high_stakes >= 0.8 then {tier:"astra", effort:"max", advice:null, cand:true}
-   elif ($escalate != "") then {tier:"astra", effort:"high", advice:null, cand:true}
-   elif ($s.difficulty.score >= 3.2 and $s.splittable <= 0.3) then {tier:"astra", effort:"high", advice:null, cand:true}
-   elif ($s.difficulty.score >= 3.2) then {tier:"terra", effort:"high", advice:"split", cand:false}
-   elif ($s.difficulty.score >= 2.5 or $s.regression.score >= 2) then {tier:"sol", effort:"high", advice:null, cand:false}
-   else {tier:"terra", effort:(if $s.difficulty.score >= 1.5 then "high" else "medium" end), advice:null, cand:false}
+     (if $features.scope_files > 5 then {tier:"terra", advice:null, cand:false}
+      else {tier:"luna", advice:null, cand:false} end)
+   elif $s.high_stakes >= 0.8 then {tier:"astra", advice:null, cand:true}
+   elif ($escalate != "") then {tier:"astra", advice:null, cand:true}
+   elif ($s.difficulty.score >= 3.2 and $s.splittable <= 0.3) then {tier:"astra", advice:null, cand:true}
+   elif ($s.difficulty.score >= 3.2) then {tier:"terra", advice:"split", cand:false}
+   elif ($s.difficulty.score >= 2.5 or $s.regression.score >= 2) then {tier:"sol", advice:null, cand:false}
+   else {tier:"terra", advice:null, cand:false}
    end) as $base
 
 # ── 人間の tier 指定が最優先 ──
 | (if $htier == null then $base else
-     {tier: $htier,
-      effort: (if $htier == "astra" then (if ($s != null and $s.high_stakes >= 0.8) then "max" else "high" end)
-               elif $htier == "sol" then "high"
-               elif $htier == "luna" then "medium"
-               else (if ($s != null and $s.difficulty.score >= 1.5) then "high" else "medium" end) end),
-      advice: null, cand: ($htier == "astra")}
+     {tier: $htier, advice: null, cand: ($htier == "astra")}
    end) as $r1
 
 # ── 固定ルール: 調査/相談/レビューでは Astra を使わない ──
 | (if ($r1.cand and (["調査","相談","レビュー"] | index($kind)) != null)
-   then {r: ($r1 + {tier:"sol", effort:"high", cand:false}), rules:["no_astra_for_kind"]}
+   then {r: ($r1 + {tier:"sol", cand:false}), rules:["no_astra_for_kind"]}
    else {r: $r1, rules: []} end) as $k1
 | $k1.r as $r2 | $k1.rules as $rules1
+
+# ── 判定者と決定式の不一致(Astra の承認・予算による切替前)──
+| (if ($signals != null and $htier == null and $signals.tier.choice != $r2.tier) then
+     {judge: $signals.tier.choice, judge_confidence: $signals.tier.confidence,
+      formula: $r2.tier, gap: ((($signals.tier.choice | tiernum) - ($r2.tier | tiernum)) | abs)}
+   else null end) as $tier_disagreement
 
 # ── Astra 候補の扱い(承認と予算)──
 | (if ($facts|has("astra_approved")) then $facts.astra_approved else null end) as $ap
 | (if ($r2.cand | not) then {r:$r2, ask:false, rules:[]}
    elif $ap == true then {r:$r2, ask:false, rules:["astra_approved"]}
-   elif $ap == false then {r: ($r2 + {tier:"sol", effort:"high"}), ask:false, rules:["astra_declined"]}
-   elif $budget.over then {r: ($r2 + {tier:"sol", effort:"high"}), ask:true, rules:["astra_budget_over"]}
+   elif $ap == false then {r: ($r2 + {tier:"sol"}), ask:false, rules:["astra_declined"]}
+   elif $budget.over then {r: ($r2 + {tier:"sol"}), ask:true, rules:["astra_budget_over"]}
    else {r:$r2, ask:true, rules:[]} end) as $k2
-| $k2.r as $rec | ($rules1 + $k2.rules) as $rules
+
+# ── effort: 最終ティアの既定値を起点に信号で上げ、台帳の許容値に丸める ──
+| $ledger.tiers[$k2.r.tier] as $tier_config
+| (if ($s != null and $k2.r.tier == "terra" and $s.difficulty.score >= 1.5
+       # 機械的作業の自動 Terra 推奨は既存どおり既定 effort。人間の tier 指定には適用しない。
+       and ($htier != null or $s.mechanical < 0.8)) then "high"
+   elif ($s != null and $k2.r.tier == "astra" and $s.high_stakes >= 0.8) then "max"
+   else $tier_config.default_effort end) as $effort
+| (($tier_config.efforts_allowed | index($effort)) == null) as $effort_clamped
+| ($k2.r + {effort: (if $effort_clamped then $tier_config.default_effort else $effort end)}) as $rec
+| ($rules1 + $k2.rules
+   + (if $escalate != "" then ["escalation_verified"] else [] end)
+   + (if $effort_clamped then ["effort_clamped"] else [] end)) as $rules
+| $tier_config.model as $model
+| $ledger.models[$model] as $model_entry
+| ($model_entry.status != "available") as $unavailable
+
+# ── 比較候補(評価用。実行もフォールバックも行わない)──
+| (if ($rec.tier == "sol" and $rec.effort == "high") then [{tier:"terra", effort:"high"}]
+   elif ($rec.tier == "terra" and $rec.effort == "medium") then [{tier:"terra", effort:"high"}]
+   elif ($rec.tier == "terra" and $rec.effort == "high") then [{tier:"sol", effort:"high"}]
+   elif ($rec.tier == "luna" and $rec.effort == "medium") then [{tier:"terra", effort:"medium"}]
+   elif ($rec.tier == "astra" and ($rec.effort == "high" or $rec.effort == "max")) then [{tier:"sol", effort:"high"}]
+   else [] end
+   | map({model: $ledger.tiers[.tier].model, effort: .effort})) as $alternatives
 
 # ── 人間が答えた軸(= 確定済み。二度と open に出さない)──
 | ([ ($facts | keys_unsorted[] as $k
@@ -342,18 +433,13 @@ def abs: if . < 0 then -. else . end;
      (($facts.delegated_to_commander // [])[]) ] | unique) as $confirmed
 
 # ── 未確定軸 ──
-| (if $s == null then [] else
+| (if $signals == null then [] else
      [ (if $s.scope_defined >= 0.8 then empty else "scope_defined" end),
        (if $s.behavior_defined >= 0.8 then empty else "behavior_defined" end),
        (if $s.done_defined >= 0.8 then empty else "done_defined" end),
        (if $s.product_decision <= 0.2 then empty else "product_decision" end),
        (if $s.ambiguity.score <= 1.0 then empty else "ambiguity" end) ]
    end) as $content_open
-# tier の推奨との段差(d)。d==0 は confidence が低くても質問しない(同じティアを聞き返さない)
-| (if $s == null then 0 else ((($s.tier.choice|tiernum) - ($r2.tier|tiernum)) | abs) end) as $tier_gap
-# 人間が Astra 承認に答えた、または推奨の根拠(high_stakes/regression)を直接答えたら tier は確定扱い
-| (($facts|has("astra_approved"))
-   or (($facts|has("high_stakes")) and ($facts|has("regression")))) as $tier_settled
 # difficulty は「推奨を左右する位置(しきい値の ±0.5 以内)」かつ低確信なら、判定者の値を自動採用として記録する
 | (if $s == null then false else
      ([1.5, 2.5, 3.2] | map((. - $s.difficulty.score) | abs) | min) <= 0.5 end) as $diff_pivotal
@@ -368,20 +454,20 @@ def abs: if . < 0 then -. else . end;
        and $s.difficulty.confidence < 0.9
        and $diff_pivotal)
    then ["difficulty"] else [] end) as $auto_decided
-| (if ($s == null or $htier != null) then [] else
+| (if ($signals == null or $htier != null) then [] else
      [ (if ($s.high_stakes <= 0.2 or $s.high_stakes >= 0.8) then empty else "high_stakes" end),
-       (if ($s.difficulty.score >= 3.2 and ($s.splittable > 0.2 and $s.splittable < 0.8)) then "splittable" else empty end),
+       (if (($s.difficulty.score >= 3.2 or ($tier_disagreement != null and $s.difficulty.score >= 2.5))
+            and ($s.splittable > 0.2 and $s.splittable < 0.8)) then "splittable" else empty end),
        (if ($s.mechanical <= 0.2 or $s.mechanical >= 0.8) then empty else "mechanical" end),
-       (if ($score_axes_relevant and $s.regression.confidence < 0.9 and $reg_pivotal) then "regression" else empty end),
-       (if ($tier_settled | not)
-           and (($tier_gap >= 2) or ($tier_gap == 1 and $s.tier.confidence < 0.9))
-        then "tier" else empty end) ]
+       (if ($score_axes_relevant and $s.regression.confidence < 0.9
+            and ($reg_pivotal or $tier_disagreement != null)) then "regression" else empty end) ]
    end) as $model_open
-| (if ($s == null and $htier == null) then ["fallback_confirm"] else [] end) as $fb_open
+| (if ($signals == null and $htier == null) then ["mechanical","high_stakes","regression"] else [] end) as $fb_open
 | (if $k2.ask then ["astra_approval"] else [] end) as $astra_open
 
-| ($content_open + $model_open + $fb_open + $astra_open
-   | map(. as $x | select(($confirmed | index($x)) == null))) as $reasons
+| (if $unavailable then [] else
+     ($content_open + $model_open + $fb_open + $astra_open
+      | map(. as $x | select(($confirmed | index($x)) == null))) end) as $reasons
 
 # ── 収束保証: 同じ軸が直前 2 ラウンド連続で open なら must_decide ──
 | (($prev_opens | length) as $n
@@ -393,9 +479,14 @@ def abs: if . < 0 then -. else . end;
 | [ $reasons[] as $reason
     | (if (["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"] | index($reason)) != null
        then "content" else "model" end) as $axis
-    | {axis: $axis, reason: $reason,
+    | (($streak2 | index($reason)) != null) as $must_decide
+    | (if (($reason == "scope_defined" or $reason == "done_defined") and ($must_decide | not))
+       then "gather" else "ask" end) as $resolution
+    | {axis: $axis, reason: $reason, resolution: $resolution,
        question:
-         (if $reason == "scope_defined" then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。対象と除外範囲を確定してください。"
+         (if ($reason == "scope_defined" and $resolution == "gather") then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。リポジトリと `git status` から対象・除外範囲を補って指示書に書き、判定し直してください。"
+          elif ($reason == "done_defined" and $resolution == "gather") then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。ベースラインを計測して指示書に書き、判定し直してください。"
+          elif $reason == "scope_defined" then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。対象と除外範囲を確定してください。"
           elif $reason == "behavior_defined" then "変更後のユーザー可視挙動・仕様値が一意に決まっていません。挙動を確定してください。"
           elif $reason == "done_defined" then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。確定してください。"
           elif $reason == "product_decision" then "未確認の製品判断が含まれています。判断を確定してください。"
@@ -403,43 +494,45 @@ def abs: if . < 0 then -. else . end;
           elif $reason == "high_stakes" then "この変更は重要・高リスク扱いにしますか?"
           elif $reason == "splittable" then "レビュー可能な独立単位に分割して複数回で委任できますか?"
           elif $reason == "mechanical" then "この作業は挙動不変の機械的な作業(move-only・rename・整形)ですか?"
+          elif ($reason == "regression" and $signals == null) then "退行時の被害度を指定してください(0 内部のみ / 1 ユーザー可視 / 2 データ・課金・認証 / 3 不可逆)。"
           elif $reason == "regression" then "退行時の被害の判定が確信に欠けます(score=\($s.regression.score)・confidence=\($s.regression.confidence))。被害度を指定してください。"
-          elif $reason == "tier" then
-            (if $tier_gap >= 2
-             then "判定者のティア候補(\($s.tier.choice))と決定式の推奨(\($r2.tier))が 2 段以上離れています。どちらにしますか?"
-             else "判定者のティア候補(\($s.tier.choice)・confidence=\($s.tier.confidence))と決定式の推奨(\($r2.tier))が 1 段ずれ、判定者の確信も低いです。どちらにしますか?"
-             end)
-          elif $reason == "fallback_confirm" then "判定者の信号がありません。静的ルールの推奨は \($rec.tier)/\($rec.effort) です。このティアで進めますか?"
           else "Astra(gpt-6-astra)を使いますか? 今週 \($budget.astra_count_7d)/\($budget.count_cap) 件・\($tok_m)M/\($cap_m)M を消費しています。"
           end),
        options:
-         (if $axis == "content" then ["指示書に追記して再判定する","司令塔の判断に任せる"]
+         (if $resolution == "gather" then ["指示書に追記して再判定する"]
+          elif $axis == "content" then ["指示書に追記して再判定する","司令塔の判断に任せる"]
           elif $reason == "high_stakes" then ["高リスク扱いにする","通常扱いにする"]
           elif $reason == "splittable" then ["分割する","分割しない"]
           elif $reason == "mechanical" then ["機械的な作業として扱う","通常の実装として扱う"]
           elif $reason == "regression" then ["0","1","2","3"]
-          elif $reason == "tier" or $reason == "fallback_confirm" then ["luna","terra","sol","astra"]
           elif $budget.over then ["Sol で代替(推奨)","分割して Terra","超過を承知で Astra を使う"]
           else ["Astra を使う","Sol で代替","分割して Terra"]
           end),
-       must_decide: (($streak2 | index($reason)) != null)}
+       must_decide: $must_decide}
   ] as $open
 
-| (if ($open | length) == 0 then "confirmed"
-   elif ($s == null and $htier == null) then "fallback"
+| (if $unavailable then "unavailable"
+   elif ($open | length) == 0 then "confirmed"
+   elif $signals == null then "fallback"
+   elif all($open[]; .resolution == "gather") then "gather_context"
    else "ask_human" end) as $gate0
 | (($gate0 == "ask_human" or $gate0 == "fallback")
    and $unattended_flag == 1
    and $rec.tier != "astra"
-   and ([$open[] | select(.reason == "fallback_confirm")] | length) == 0
+   and $signals != null
    and ([$open[] | select(.axis != "model")] | length) == 0) as $unattended
 | (if $unattended then "confirmed" else $gate0 end) as $gate
 
 | {route_id: $route_id, round: $round, kind: $kind, instruction: $instruction,
+   policy_version: $policy_version, ledger_version: $ledger.ledger_version,
    instruction_sha256: $instruction_sha256,
    series_key: (if $series_key == "" then null else $series_key end),
    escalate_from: (if $escalate == "" then null else $escalate end),
-   recommend: {model: ($rec.tier | model_of), effort: $rec.effort},
+   recommend: {model: $model, effort: $rec.effort}, alternatives: $alternatives,
+   tier_disagreement: $tier_disagreement,
+   unavailable_reason: (if $unavailable then
+     "推奨ティア \($rec.tier) のモデル \($model) は台帳で status=\($model_entry.status)(verified_at \($model_entry.verified_at))。models.json を更新するか、--human-facts \u0027{\"tier\":\"…\"}\u0027 で別のティアを指定する"
+     else null end),
    advice: $rec.advice,
    gate: $gate, unattended: $unattended,
    open: $open, auto_decided: $auto_decided,
@@ -472,8 +565,13 @@ echo "delegate-route: route_id $ROUTE_ID / round $ROUND / gate $G / 推奨 $R" >
 if [ "$(printf '%s' "$RECORD" | jq -r '.auto_decided | index("difficulty") != null')" = "true" ]; then
   printf '%s' "$RECORD" | jq -r '"delegate-route: 自動採用: difficulty(score=\(.signals.difficulty.score) / confidence=\(.signals.difficulty.confidence))"' >&2
 fi
+printf '%s' "$RECORD" | jq -r '
+  select(.tier_disagreement != null and .gate != "unavailable"
+    and all(.open[]; .reason as $reason | ["high_stakes","splittable","mechanical","regression"] | index($reason) == null))
+  | .tier_disagreement
+  | "delegate-route: 判定者の候補 \(.judge) と決定式の推奨 \(.formula) が異なるが、材料軸は確定済みのため決定式を採用(tier_disagreement に記録)"' >&2
 if [ "$G" != "confirmed" ]; then
-  printf '%s' "$RECORD" | jq -r '.open[] | "  [\(.axis)/\(.reason)]\(if .must_decide then "(must_decide)" else "" end) \(.question)"' >&2
+  printf '%s' "$RECORD" | jq -r '.open[] | "  [\(.axis)/\(.reason)/\(.resolution)]\(if .must_decide then "(must_decide)" else "" end) \(.question)"' >&2
   echo "  回答後: delegate-route --route-id $ROUTE_ID --human-facts '{…}' で再判定する" >&2
 fi
 exit 0

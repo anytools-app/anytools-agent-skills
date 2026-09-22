@@ -42,8 +42,10 @@ set -u
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 SKILL_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
 ENV_LOG_DIR="${DELEGATE_LOG_DIR:-}"; ENV_GROK_BIN="${GROK_BIN:-}"; ENV_AGY_BIN="${AGY_BIN:-}"
+ENV_MODELS_FILE="${DELEGATE_MODELS_FILE:-}"
 [ -f "$SKILL_DIR/.env" ] && { set -a; . "$SKILL_DIR/.env"; set +a; }
 LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}}"
+MODELS_FILE="${ENV_MODELS_FILE:-${DELEGATE_MODELS_FILE:-$SKILL_DIR/models.json}}"
 RUNS_JSONL="$LOG_DIR/runs.jsonl"
 GROK_BIN="${ENV_GROK_BIN:-${GROK_BIN:-$HOME/.grok/bin/grok}}"
 AGY_BIN="${ENV_AGY_BIN:-${AGY_BIN:-$HOME/.local/bin/agy}}"
@@ -516,6 +518,44 @@ case "$CLI" in
     [ -z "$TIMEOUT_MIN" ] && TIMEOUT_MIN=10
     ;;
 esac
+
+# ── Codex effort の台帳検査(Astra の route 検査より先。dry-run にも適用)──
+if [ "$CLI" = "codex" ]; then
+  [ -f "$MODELS_FILE" ] || die "モデル台帳が存在しない: $MODELS_FILE"
+  LEDGER="$(jq -ces 'if length == 1 then .[0] | select(type == "object") else empty end' \
+    "$MODELS_FILE" 2>/dev/null)" || die "モデル台帳が JSON オブジェクトとして解析できない: $MODELS_FILE"
+  LEDGER_ERRORS="$(printf '%s' "$LEDGER" | jq -r '
+    def nonempty_strings:
+      if type != "array" then false else length > 0 and all(.[]; type == "string") end;
+    first(
+      if (.models | type) != "object" then "models: オブジェクトが必要"
+      elif (.tiers | type) != "object" then "tiers: オブジェクトが必要"
+      elif (.ledger_version | type) != "string" then "ledger_version: 文字列が必要"
+      else . as $ledger
+        | ((["luna","terra","sol","astra"][] as $tier
+            | select($ledger.tiers | has($tier) | not)
+            | "tiers.\($tier): 必須項目が無い"),
+           ($ledger.tiers | to_entries[] | .key as $tier | .value as $config
+            | if ($config | type) != "object" then "tiers.\($tier): オブジェクトが必要"
+              elif ($config.model | type) != "string" then "tiers.\($tier).model: 文字列が必要"
+              elif ($ledger.models | has($config.model) | not) then "tiers.\($tier).model: models に無い: \($config.model)"
+              elif ($config.efforts_allowed | nonempty_strings | not) then "tiers.\($tier).efforts_allowed: 1 件以上の文字列配列が必要"
+              elif ($config.default_effort | type) != "string" then "tiers.\($tier).default_effort: 文字列が必要"
+              elif ($config.efforts_allowed | index($config.default_effort)) == null then "tiers.\($tier).default_effort: efforts_allowed に含まれていない"
+              else empty end),
+           ($ledger.models | to_entries[] | .key as $model | .value as $config
+            | if ($config | type) != "object" then "models.\($model): オブジェクトが必要"
+              elif ($config.efforts_supported | nonempty_strings | not) then "models.\($model).efforts_supported: 1 件以上の文字列配列が必要"
+              elif ($config.status | type) != "string" then "models.\($model).status: 文字列が必要"
+              else empty end))
+      end)')" || die "モデル台帳が不正: schema: 検証できない"
+  [ -z "$LEDGER_ERRORS" ] || die "モデル台帳が不正: $LEDGER_ERRORS"
+  if printf '%s' "$LEDGER" | jq -e --arg model "$MODEL" '.models | has($model)' >/dev/null; then
+    SUPPORTED_EFFORTS="$(printf '%s' "$LEDGER" | jq -c --arg model "$MODEL" '.models[$model].efforts_supported')"
+    printf '%s' "$SUPPORTED_EFFORTS" | jq -e --arg effort "$EFFORT" 'index($effort) != null' >/dev/null 2>&1 \
+      || die "effort $EFFORT は $MODEL が対応していない(models.json の efforts_supported: $SUPPORTED_EFFORTS)"
+  fi
+fi
 
 # ── cooldown ゲート(limit 記録済みの CLI は実行前に止める)──
 if [ "$FORCE" -eq 0 ]; then

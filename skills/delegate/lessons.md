@@ -44,6 +44,7 @@
 - **上位モデルが事実上のデフォルトになる逸脱は、司令塔の自己採点では検出できない(2026-09-05〜09-19 実測)**: `gpt-6-astra` が 182 件・18.1 億トークンで codex 消費の約 75%。週次枠を 2 週間で 4 回使い切った。モデル表は「難所・重要のみ」だったが、Astra 実装 163 件中 note に選定根拠があるのは 7 件、表に無い `astra/medium`・`low` が 50 件、move-only・歴史化など挙動不変の作業に 4.2 億トークン。1 リポジトリの連作(86 件・14.7 億)では Terra が 0 件になっていた(8 月は同リポジトリで Terra 48 件・中央値 220 万)。この間 `routing_verdict:"過剰"` は 589 件中 2 件 → 規約の文言ではなく**機械的なゲート**で担保する: `delegate-route`(週予算・人間承認)と `delegate-run` の Astra 拒否
 - **クォータの減り方はトークン数に比例しない(推定)**: `~/.codex/sessions/**/rollout-*.jsonl` の `token_count` イベントにある `rate_limits.primary.used_percent`(週次枠)から、Astra は同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍を消費(週次枠 1% あたり Astra 約 110 万・Terra 約 340 万・Sol 約 570 万トークン)。セッションの並走で増分が混ざるため絶対値は ±30〜50% の推定。週予算 8,000 万トークン / 8 件はここから置いた初期値で、見直しのたびに実測し直す
 - **品質は良いので「禁止」ではなく「予算」**: Astra 実装は採用率 98%・`cause:"model"` 5.5%(Terra high 21%・medium 10%)。一方 `cause:"instruction"` が 20% と高く、大きいタスクを指示書の未確定点ごと渡していた兆候 → 委任前に内容の未確定点を人間へ質問して潰す(`SKILL.md`「ティア判定と確定ループ」)
+- **Astra 承認ゲートは、同一セッションへの修正指示(別ファイルの継続指示書)を弾く(2026-09-22 実測)**: `delegate-run` の Astra 検査は `--prompt-file` の SHA-256 が承認時の指示書と一致することを要求するため、承認済みセッションへ `--resume` で修正指示書(別ファイル)を渡すと「instruction_sha256 が一致しない」で拒否される。規約は「同一セッションの resume は可」なので検査側の穴。当面は承認済み route と同じ session_id への resume に限り `--force-astra` で通し、委任ログの `note` に理由を書く。恒久対策(候補): `--resume` の session_id が同じ route_id で承認済み実行の session_id と一致する場合は SHA 検査を免除する(承認は「その内容での新規実行 1 回」に紐付き、同一セッションの修正は新規実行ではないため)
 - **delegate-run 自身を変更する委任は、作業ツリーの delegate-run で走らせない(2026-09-19 実測)**: `~/.claude/skills/delegate` はこのリポジトリへの symlink なので、委任先が `bin/delegate-run` を書き換えると、走行中のラッパー(bash はスクリプトを逐次読みする)が途中から別の内容を読み、委任完了後に構文エラーで落ちた。codex 本体の作業は無事だったが、後処理(runs.jsonl の記録・トークン抽出・指示書の退避)が丸ごと欠落 → このスキルの `bin/` を変更対象に含む委任では、`git show HEAD:skills/delegate/bin/delegate-run > <scratchpad>/delegate-run-stable` のコピーをラッパーに使う(`.env` を読めないので `DELEGATE_LOG_DIR` 等は環境変数で渡す)。欠落した run は codex のログから session_id を拾い、`--extract-tokens` で補完して委任ログに記録する
 - **指示書の保全が未実装だった**: 0.24.0 で計画した `$LOG_DIR/instructions/<run_id>.md` への退避が入っておらず、現存 1 件。過去ログでのバックテストができなかった → 0.26.0 で `delegate-run` に実装
 
@@ -153,6 +154,31 @@ jq -s 'map(select(.human_facts != null)) | group_by(.route_id) | map(last) |
 - 人間回答との一致率が高い軸は確定域の閾値(0.2 / 0.8、confidence 0.9)を緩める根拠、低い軸は判定依頼書(`templates.md`「4.」)の質問文を直す根拠。閾値の変更は「同じ軸で 3 件以上」の規律に従う
 - 難度の自動採用(0.26.1): `auto_decided` に `difficulty` が入った route の件数と、その委任の `cause:"model"` 率を見る(`jq -s '[.[] | select((.auto_decided // []) | index("difficulty"))] | group_by(.route_id) | length' "$LOG_DIR/route-decisions.jsonl"`)。低確信の難度をそのまま使って下位ティアへ落とした害が偏って出たら(同じ組で 3 件以上)、決定式のしきい値か判定依頼書の難度レベルの記述を見直す — 質問へは戻さない(ユーザー方針 2026-09-20: 難度は人間に聞かず自己判断)
 - 効果測定: 質問を経た委任と経ない委任の `cause:"instruction"` 率、推奨どおり下位ティアで走らせた委任の `cause:"model"` 率(基準: Terra medium 10%・high 21%)、`--force-astra` による Astra 強行の件数(`runs.jsonl` の `astra_forced`)
+- **成功した仕事あたりの総費用**(0.27.0。OpenAI / Anthropic の公式選定原則「精度目標を先に、費用はその後」を運用に落とした指標。失敗・破棄に費やした分も含めてモデル×effort ごとに比較する。採用 0 件は計算不能として扱い、難易度・種別の違う委任を混ぜた平均だけで順位を決めない):
+
+```bash
+jq -s 'map(select(.kind == "実装" and .cli == "codex")) | group_by([.model, .effort]) |
+  map({model: .[0].model, effort: .[0].effort, n: length, adopted: (map(select(.outcome == "採用"))|length),
+       tokens: (map(.tokens // 0)|add), cost_usd: ((map(.cost_usd // 0)|add)*100|round/100)}
+      | . + {tokens_per_success: (if .adopted == 0 then "n/a" else (.tokens / .adopted | floor) end),
+             cost_per_success: (if .adopted == 0 then "n/a" else (.cost_usd / .adopted * 100 | round / 100) end)})
+  | sort_by(.model, .effort)' "$LOG_DIR/delegation-log.jsonl"
+```
+
+- **ティアは人間に聞かない(0.27.0、ユーザー方針 2026-09-22)**: 判定者の候補と決定式の推奨が割れても「どちらにしますか」は出さず、材料軸(重要・高リスクか / 被害度 / 分割可否 / 機械的か)のうち未確定のものだけを聞く。割れは `tier_disagreement`(判定者の候補・確信・決定式の推奨・段差)に残るので、見直しでは「割れた route の件数」「割れたまま決定式で走らせた委任の `cause:"model"` 率と `routing_verdict`」「人間が材料軸に答えた結果ティアが動いた件数」を見る。判定者の候補の方が結果的に正しかった組が 3 件以上偏れば、決定式の閾値(その軸)を直す — ティアの質問へは戻さない:
+
+```bash
+jq -s 'map(select(.tier_disagreement != null)) | group_by(.route_id) | map(last) |
+  {disagreements: length, pairs: (map("\(.tier_disagreement.judge)→\(.tier_disagreement.formula)")|group_by(.)|map({(.[0]): length})|add)}' "$LOG_DIR/route-decisions.jsonl"
+```
+
+- シャドー評価(0.27.0): `route-decisions.jsonl` の `alternatives`(隣接ティア・effort の比較候補)と実際の `recommend` を並べ、`alternatives` 側のモデル×effort が委任ログで同等以上の採用率・低い `cause:"model"` 率を出しているなら、決定式の閾値を見直す材料にする。`gather_context` で人間の質問を経ずに確定した割合(`gate` の推移で `gather_context → confirmed`)、`rules_applied` に `escalation_verified` が入った昇格の件数と、その委任の結果も見る:
+
+```bash
+jq -s 'group_by(.route_id) | map({gates: map(.gate), alt: (.[-1].alternatives // []), rec: .[-1].recommend, esc: ((.[-1].rules_applied // []) | index("escalation_verified") != null)}) |
+  {routes: length, gather_only: (map(select((.gates|index("gather_context")) != null and (.gates|index("ask_human")) == null))|length),
+   escalations: (map(select(.esc))|length), alternatives: (map(.alt[]? | "\(.model)/\(.effort)")|group_by(.)|map({(.[0]): length})|add)}' "$LOG_DIR/route-decisions.jsonl"
+```
 - 判定者の確率は較正されていない(Claude サブエージェント)。Jev 等へ差し替えたら、差し替え前後で一致率を比較する
 
 ### 司令塔スコアカード(見直しごとに算出・追記)

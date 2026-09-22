@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.0] - 2026-09-22
+
+### Added
+
+- `models.json`(モデル台帳): ティア→モデル ID、対応 effort(`efforts_supported`)、運用で許す effort(`efforts_allowed`)、既定 effort、可用性、確認日、出典、フォールバック先を 1 か所に持つ。`ledger_version` を持ち、`delegate-route` の判定結果と記録行に `policy_version`(決定式の版)と共に残る。モデルの差し替え・切り戻しは台帳の更新だけで行い、判定コードは変えない
+- delegate-route: gate に `gather_context`(未確定が対象範囲・完了条件だけのとき。司令塔がリポジトリとベースラインから指示書を補って再判定し、人間には聞かない)と `unavailable`(推奨ティアのモデルが台帳で available でないとき。別モデルへ黙って置き換えない)を追加。`open[]` の各質問に `resolution`(`gather` / `ask`)を付与
+- delegate-route: `alternatives`(隣接ティア・effort の比較候補 1 件。評価用の記録で実行はしない)を出力
+- delegate-route: `--escalate-from` を委任ログで検証する。Terra / Sol の `cause:"model"` の失敗が合計 2 回(`resumes` を含む)に満たない、原因が `instruction` / `environment` / `tooling` 等、run_id が無い、のいずれも exit 2 で拒否し、昇格でなく原因分類へ戻す。通ったら `rules_applied` に `escalation_verified`。run_id の前後の空白は除去する
+- delegate-route / delegate-run: 台帳のスキーマ検証(`efforts_allowed` / `efforts_supported` が 1 件以上の文字列配列、`default_effort` が `efforts_allowed` に含まれる、`status` / `ledger_version` が文字列)。不正なら exit 2
+- delegate-run: `--cli codex` で台帳にあるモデルに対し、台帳の `efforts_supported` に無い `--effort` を実行前に拒否する(例: Luna の `ultra`)
+- lessons: 見直し指標に「成功した仕事あたりの総費用」(失敗分を含むモデル×effort 別)、`alternatives` のシャドー評価、`gather_context` で質問を経ずに確定した割合、検証済み昇格の件数を追加
+
+### Changed
+
+- delegate-route: ティアの決定と effort の決定を 2 段に分離(閾値・結果は不変。effort は台帳の `default_effort` を起点に信号で上げ、`efforts_allowed` に無ければ丸めて `rules_applied` に `effort_clamped`。機械的作業(`mechanical ≥ 0.8`)で対象 6 ファイル超のため Terra になった場合は旧決定式どおり difficulty による high への昇格を掛けず medium のまま)
+- delegate-route: **ティアそのものを人間に聞かない**(ユーザー方針 2026-09-22)。判定者の候補と決定式の推奨が割れても「どちらにしますか?」は出さず、推奨を左右する材料軸(`high_stakes` / `regression` / `splittable` / `mechanical`)のうち未確定のものだけを聞く。材料が確定していれば決定式を採用し `tier_disagreement` を記録する。信号なし(`fallback`)でも「このティアで進めますか?」は出さず材料を聞く。`--human-facts tier` は明示指定として引き続き受け付ける。Astra の承認(予算消費の可否)は従来どおり毎回人間に聞く
+- SKILL / adapters/codex: モデル ID・effort・可用性の正は `models.json` と明記。確定ループの手順に `gather_context` と `unavailable` を追加
+- 背景: OpenAI(model selection)・Anthropic(choosing a model / effort)の公式選定原則を一次情報で確認し、「精度目標を先に、費用はその後」「effort はモデル切替とは別のレバー」「自データで評価」を運用へ反映。判定結果は同じ入力・台帳・facts で決定的
+
 ## [0.26.1] - 2026-09-20
 
 ### Changed
