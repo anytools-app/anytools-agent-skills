@@ -1,16 +1,176 @@
 {
-  "ledger_version": "2026-09-22.1",
+  "ledger_version": "2026-09-23.1",
   "models": {
-    "gpt-6-astra":   {"provider":"openai","cli":"codex","efforts_supported":["low","medium","high","xhigh","max","ultra"],"status":"available","verified_at":"2026-09-22","source":"https://learn.chatgpt.com/docs/models","fallback":"gpt-5.6-sol"},
-    "gpt-5.6-sol":   {"provider":"openai","cli":"codex","efforts_supported":["low","medium","high","xhigh","max","ultra"],"status":"available","verified_at":"2026-09-22","source":"https://learn.chatgpt.com/docs/models","fallback":"gpt-5.5"},
-    "gpt-5.6-terra": {"provider":"openai","cli":"codex","efforts_supported":["low","medium","high","xhigh","max","ultra"],"status":"available","verified_at":"2026-09-22","source":"https://learn.chatgpt.com/docs/models","fallback":"gpt-5.5"},
-    "gpt-5.6-luna":  {"provider":"openai","cli":"codex","efforts_supported":["low","medium","high","xhigh","max"],"status":"available","verified_at":"2026-09-22","source":"https://learn.chatgpt.com/docs/models","fallback":"gpt-5.4-mini"},
-    "gpt-5.5":       {"provider":"openai","cli":"codex","efforts_supported":["low","medium","high","xhigh"],"status":"available","verified_at":"2026-09-22","source":"https://learn.chatgpt.com/docs/models","fallback":null}
+    "gpt-6-astra": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-6-sol"
+    },
+    "gpt-6-sol": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-5.6-sol"
+    },
+    "gpt-6-luna": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-5.6-luna"
+    },
+    "gpt-5.6-sol": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-5.5"
+    },
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-5.5"
+    },
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-5.5"
+    },
+    "gpt-5.5": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "status": "available",
+      "verified_at": "2026-09-23",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": null,
+      "retirement_at": "2026-10-14"
+    }
   },
   "tiers": {
-    "luna":  {"model":"gpt-5.6-luna",  "efforts_allowed":["medium"],        "default_effort":"medium"},
-    "terra": {"model":"gpt-5.6-terra", "efforts_allowed":["medium","high"], "default_effort":"medium"},
-    "sol":   {"model":"gpt-5.6-sol",   "efforts_allowed":["high"],          "default_effort":"high"},
-    "astra": {"model":"gpt-6-astra",   "efforts_allowed":["high","max"],    "default_effort":"high"}
+    "luna": {
+      "model": "gpt-6-luna",
+      "efforts_allowed": [
+        "medium"
+      ],
+      "default_effort": "medium"
+    },
+    "terra": {
+      "model": "gpt-6-sol",
+      "efforts_allowed": [
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium"
+    },
+    "sol": {
+      "model": "gpt-6-sol",
+      "efforts_allowed": [
+        "xhigh"
+      ],
+      "default_effort": "xhigh"
+    },
+    "astra": {
+      "model": "gpt-6-astra",
+      "efforts_allowed": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high"
+    }
+  },
+  "claude_agent": {
+    "_note": "Claude サブエージェント(Agent ツール)の役割→エイリアス→実測の解決先。Agent ツールの model はエイリアス 4 値固定。フル ID はサブエージェント定義(frontmatter model)か ANTHROPIC_DEFAULT_OPUS_MODEL でのみ指定できる(公式 docs、未実測)",
+    "roles": {
+      "explore": {
+        "alias": "haiku",
+        "resolved": "claude-haiku-4-5",
+        "verified_at": "2026-09-23",
+        "source": "https://platform.claude.com/docs/en/models/overview(エイリアス表。このセッションでは未実測)"
+      },
+      "judge": {
+        "alias": "sonnet",
+        "resolved": "claude-sonnet-5",
+        "verified_at": "2026-09-23",
+        "source": "transcript .message.model(2026-09-23 実測)"
+      },
+      "review": {
+        "alias": "opus",
+        "resolved": "claude-opus-5",
+        "verified_at": "2026-09-23",
+        "source": "transcript .message.model(2026-09-23 実測。公式 docs は opus → Opus 5.5 / v2.1.280 以降と記載、デスクトップ版 2.1.280 では Opus 5)",
+        "pin_for_opus_5_5": "claude-opus-5-5"
+      },
+      "commander": {
+        "alias": "best",
+        "resolved": "claude-fable-5-1",
+        "verified_at": "2026-09-23",
+        "source": "delegate-run --current-commander"
+      }
+    }
   }
 }

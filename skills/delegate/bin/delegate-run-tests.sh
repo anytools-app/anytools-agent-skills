@@ -3,13 +3,13 @@
 # すべて --dry-run(または引数エラー)で完結し、実際の CLI 呼び出しは行わない。
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)/delegate-run"
-MODELS_FILE="$(dirname "$BIN")/../models.json"
-unset DELEGATE_MODELS_FILE
 PASS=0; FAIL=0
 
 # 隔離環境(環境変数は skill の .env より優先されるので、実 .env があってもテストは隔離される)
 TMP="$(mktemp -d)"
 export DELEGATE_LOG_DIR="$TMP/logs"
+export DELEGATE_MODELS_FILE="$(cd "$(dirname "$0")" && pwd)/testdata/models.fixture.json"
+MODELS_FILE="$DELEGATE_MODELS_FILE"
 GITDIR="$TMP/repo"; mkdir -p "$GITDIR"; git -C "$GITDIR" init -q
 NONGIT="$TMP/plain"; mkdir -p "$NONGIT"
 PROMPT="$TMP/prompt.md"; echo "テスト指示" > "$PROMPT"

@@ -3,12 +3,18 @@
 # 実ログを汚さないよう DELEGATE_LOG_DIR は必ず一時ディレクトリを指す。
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)/delegate-route"
-MODELS_FILE="$(dirname "$BIN")/../models.json"
-unset DELEGATE_MODELS_FILE
+PROD_MODELS_FILE="$(dirname "$BIN")/../models.json"
+# 本番台帳を更新するときは、同じコミットでこの期待値も更新する。
+PROD_TIER_LUNA="gpt-6-luna"
+PROD_TIER_TERRA="gpt-6-sol"
+PROD_TIER_SOL="gpt-6-sol"
+PROD_TIER_ASTRA="gpt-6-astra"
 PASS=0; FAIL=0
 
 TMP="$(mktemp -d)"
 export DELEGATE_LOG_DIR="$TMP/logs"
+export DELEGATE_MODELS_FILE="$(cd "$(dirname "$0")" && pwd)/testdata/models.fixture.json"
+MODELS_FILE="$DELEGATE_MODELS_FILE"
 export DELEGATE_ROUTE_TODAY="2026-09-19"   # today-6 = 2026-09-13 / today-7 = 2026-09-12
 mkdir -p "$DELEGATE_LOG_DIR"
 # 既存の昇格ケースも、検証可能な Terra / Sol の失敗履歴を持つ。
@@ -52,6 +58,24 @@ BASE='{"judge":"claude-agent:sonnet",
  "tier":{"choice":"terra","confidence":0.9},
  "scope_defined":0.95,"behavior_defined":0.9,"done_defined":0.9,"product_decision":0.05}'
 sig() { printf '%s' "$BASE" | jq -c "${1:-.}"; }
+
+# ── 本番台帳: fixture と分離して現在の台帳を検査 ──────────────────────
+runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig)"
+assert_exit "本番台帳: delegate-route で判定できる" 0
+OUT="$(jq -c . "$PROD_MODELS_FILE" 2>/dev/null)"; CODE=$?
+assert_j "本番台帳: luna のモデル ID" '.tiers.luna.model' "$PROD_TIER_LUNA"
+assert_j "本番台帳: terra のモデル ID" '.tiers.terra.model' "$PROD_TIER_TERRA"
+assert_j "本番台帳: sol のモデル ID" '.tiers.sol.model' "$PROD_TIER_SOL"
+assert_j "本番台帳: astra のモデル ID" '.tiers.astra.model' "$PROD_TIER_ASTRA"
+assert_j "本番台帳: efforts_allowed は efforts_supported の部分集合" \
+  '[. as $ledger | .tiers[] | . as $tier | $tier.efforts_allowed[] | . as $effort | ($ledger.models[$tier.model].efforts_supported | index($effort) != null)] | all' "true"
+assert_j "本番台帳: default_effort は efforts_allowed に含まれる" \
+  '[.tiers[] | .default_effort as $default | (.efforts_allowed | index($default) != null)] | all' "true"
+assert_j "本番台帳: fallback は null または models に存在する" \
+  '.models as $models | [$models[] | .fallback as $fallback | ($fallback == null or ($models | has($fallback)))] | all' "true"
+PROD_RUN_DIR="$TMP/prod-ledger-repo"; mkdir -p "$PROD_RUN_DIR"; git -C "$PROD_RUN_DIR" init -q
+runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --force-astra --cli codex --mode write --model "$PROD_TIER_ASTRA" --effort high --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
+assert_exit "本番台帳: delegate-run のスキーマ検証を通る" 0
 
 # ── signals 検証 ───────────────────────────────────────
 runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig 'del(.mechanical)')"

@@ -26,7 +26,7 @@ cp .env.example .env    # in this directory, if you want a custom log location
 
 ### Pin the orchestrator model (recommended)
 
-The skill assumes the model you talk to — the main Claude Code session — is the single, pinned orchestrator. You never re-pick the orchestrator per task: implementation tokens flow to the workers, and per-task model selection happens on the worker side (Codex Luna/Terra/Sol etc.), so the orchestrator should simply be the strongest model you have — its diff-review quality is the ceiling for everything the workers produce.
+The skill assumes the model you talk to — the main Claude Code session — is the single, pinned orchestrator. You never re-pick the orchestrator per task: implementation tokens flow to the workers, and per-task model selection happens on the worker side (Codex Luna / Sol / Astra etc.; the tier-to-model mapping lives in `models.json`), so the orchestrator should simply be the strongest model you have — its diff-review quality is the ceiling for everything the workers produce.
 
 Add one line to `~/.claude/settings.json`:
 
@@ -36,7 +36,7 @@ Add one line to `~/.claude/settings.json`:
 }
 ```
 
-- `"best"` is an official alias resolving to Fable 5 where you have access, otherwise the latest Opus
+- `"best"` is an official alias resolving to the latest Fable (5.1 as of 2026-09) where you have access, otherwise the latest Opus (5.5 as of 2026-09)
 - The skill never changes the main session's model or effort while running (no frontmatter overrides)
 - Optionally pair with `"effortLevel": "high"` for maximum orchestrator judgment, at higher token cost
 

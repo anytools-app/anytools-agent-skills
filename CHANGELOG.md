@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.28.0] - 2026-09-23
+
+### Changed
+
+- models.json(`ledger_version` 2026-09-23.1): Codex のモデル表を GPT-6 世代へ更新。ティア対応を luna → `gpt-6-luna` / medium、terra → `gpt-6-sol` / medium|high、sol → `gpt-6-sol` / xhigh に切り替え(astra は `gpt-6-astra` / high|max のまま)。GPT-5.6 Sol / Terra / Luna は旧世代のフォールバックとして残置、`gpt-5.5` は 2026-10-14 退役を注記。根拠: 公式モデルページ・changelog(2026-09-22「GPT-6 Sol and GPT-6 Luna are rolling out to Codex … at lower token prices than their GPT-5.6 predecessors」)と、Codex CLI 0.156.0 での read-only 疎通(0.154.0 では ChatGPT アカウントで 400)
+- adapters/codex: モデル表を GPT-6 世代に改定。難所ティアは同じ GPT-6 Sol の xhigh で担う(effort はモデル切替とは別のレバー)。週次枠の消費係数は未実測のため、切替後 1 週間は `delegate-route --budget` と rate_limits を追う
+- テスト: `delegate-route-tests.sh` / `delegate-run-tests.sh` はテスト専用の台帳 `bin/testdata/models.fixture.json`(0.27.0 時点の内容)に固定し、本番 `models.json` の内容は専用の検査(ティアのモデル ID・effort の整合・fallback の参照)で見る。台帳の差し替えで既存テストが壊れない
+- models.json: `claude_agent` 節を追加(Claude サブエージェントの役割 → エイリアス → 実測の解決先・確認日。2026-09-23 実測: `opus` → Claude Opus 5、`sonnet` → Sonnet 5、`best` → Fable 5.1。Opus 5.5 のピン留め方法を注記)。SKILL: 複雑な独立レビュー・設計相談は `opus` と明記
+- README / lessons: Claude の現行ラインナップ(2026-09-23: Claude Opus 5.5 登場、Fable 5.1 / Sonnet 5 / Haiku 4.5 据え置き)を確認。司令塔の `"best"` とサブエージェントのエイリアスは自動追従のため運用変更なし
+
 ## [0.27.0] - 2026-09-22
 
 ### Added
