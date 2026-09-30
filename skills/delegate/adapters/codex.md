@@ -2,41 +2,41 @@
 
 役割: **通常実装のデフォルト委任先**。コード密着の read-only 相談・詳細設計ドラフトのレビューにも使う。**Web 調査には使わない**(委任時は web_search を切って運用する。Web が要るタスクは Grok / Antigravity へ)。
 
-## モデル表(GPT-6 世代: Sol / Luna が主系統、Astra は「ここ一番」限定 / 2026-09-23 改定)
+## モデル表(GPT-6 世代: 6.1 Sol / Luna が主系統、Astra は「ここ一番」限定 / 2026-09-30 改定)
 
 > モデル ID・対応 effort(`efforts_supported`)・運用で許す effort(`efforts_allowed`)・可用性(`status`)の**正は `../models.json`(台帳、0.27.0)**。この表は用途の説明で、値が食い違えば台帳が正。`delegate-route` は台帳からモデルを解決し、`delegate-run` は台帳の `efforts_supported` に無い effort(例: Luna の `ultra`)を実行前に拒否する。モデルの追加・退役・effort の変更は台帳の `ledger_version` を上げて行う。
 
-通常実装は **GPT-6 Sol**(公式: 「Built for complex coding and agentic workflows, with stronger factual reliability」、models_cache の説明は「Workhorse model for coding and everyday work」)、機械的な作業は **GPT-6 Luna**(「Our most efficient model for focused, high-volume tasks」)を主系統とし、GPT-6 Astra は週予算つきの「ここ一番」に限る(下記「Astra の使用条件と週予算」)。GPT-6 に Terra は無いので、従来の Terra の役割(標準実装)は Sol の medium / high、難所は同じ Sol の xhigh で担う(effort はモデル切替とは別のレバー、という両社の公式方針どおり)。根拠: 公式モデルページ https://learn.chatgpt.com/docs/models と changelog(2026-09-22: 「GPT-6 Sol and GPT-6 Luna are rolling out to Codex … at lower token prices than their GPT-5.6 predecessors」)。API 料金は Astra $10 / $50、Sol $2 / $10、Luna $0.1 / $0.5(per 1M、2026-09-23 確認)。
+通常実装は **GPT-6.1 Sol**(`gpt-6.1-sol`。2026-09-29 公開、公式モデルページで GPT-6 Sol の後継。「Near-Astra performance at lower cost」、models_cache の説明は「Latest workhorse model for coding and everyday work」。API 料金は GPT-6 Sol と同じ $2 / $10)、機械的な作業は **GPT-6 Luna**(「Our most efficient model for focused, high-volume tasks」)を主系統とし、GPT-6 Astra は週予算つきの「ここ一番」に限る(下記「Astra の使用条件と週予算」)。GPT-6 に Terra は無いので、従来の Terra の役割(標準実装)は Sol の medium / high、難所は同じ Sol の xhigh で担う(effort はモデル切替とは別のレバー、という両社の公式方針どおり)。根拠: 公式モデルページ https://learn.chatgpt.com/docs/models と changelog(2026-09-22: 「GPT-6 Sol and GPT-6 Luna are rolling out to Codex … at lower token prices than their GPT-5.6 predecessors」)。API 料金は Astra $10 / $50、Sol $2 / $10、Luna $0.1 / $0.5(per 1M、2026-09-23 確認)。
 
-手元の `~/.codex/models_cache.json`(`fetched_at`: 2026-09-23 / client 0.156.0)で `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` と GPT-5.6 系が `visibility:"list"`。**Codex CLI 0.154.0 では `-m gpt-6-sol` / `gpt-6-luna` が「not supported when using Codex with a ChatGPT account」(400)になり、0.156.0 へ更新して解消**(2026-09-23 実測、read-only 疎通 exit 0)。GPT-6 Sol / Astra の supported effort は `low` / `medium` / `high` / `xhigh` / `max` / `ultra`、Luna は `ultra` 無し、default はいずれも `medium`。**週次枠の消費係数は未実測**(Astra は 5.6 Terra の 3〜4 倍だった)。切替後 1 週間は `delegate-route --budget` と `~/.codex/sessions` の rate_limits を見る。
+手元の `~/.codex/models_cache.json`(`fetched_at`: 2026-09-30 / client 0.159.2)で `gpt-6.1-sol`(priority 1)/ `gpt-6-astra` / `gpt-6-sol`(「Previous generation workhorse model」)/ `gpt-6-luna` と GPT-5.6 系が `visibility:"list"`。**新しいモデルは CLI が古いと 400「not supported when using Codex with a ChatGPT account」になる**: GPT-6 Sol / Luna は 0.154.0 で失敗し 0.156.0 で解消(2026-09-23)、GPT-6.1 Sol は 0.156.0 で失敗し 0.159.2 で解消(2026-09-30。対応は 0.159.1 から)。手順は `../SKILL.md`「モデルが使えないとき(CLI の更新)」。GPT-6.1 Sol / GPT-6 Sol / Astra の supported effort は `low` / `medium` / `high` / `xhigh` / `max` / `ultra`、Luna は `ultra` 無し。default は 6.1 Sol だけ `low`(他は `medium`)だが、委任では effort を毎回明示するので影響しない。**GPT-6.1 Sol の週次枠の消費係数は未実測**(Astra は 5.6 Terra の 3〜4 倍だった)。切替後 1 週間は `delegate-route --budget` と `~/.codex/sessions` の rate_limits を見て、GPT-6 Sol より明らかに重ければ台帳の terra / sol を `gpt-6-sol` に戻す。
 
 | タスク | 例 | フラグ |
 |---|---|---|
 | 機械的な作業(luna) | リネーム、定型コード追加、雛形作成、仕様が完全に固定されたテスト追加 | `-m gpt-6-luna -c 'model_reasoning_effort="medium"'` |
-| 標準的な実装(terra) | 通常の機能追加・障害修正 | `-m gpt-6-sol -c 'model_reasoning_effort="medium"'` |
-| 横断的な標準実装(terra / high) | 複数レイヤー、状態遷移、DB移行、並行処理を伴う変更 | `-m gpt-6-sol -c 'model_reasoning_effort="high"'` |
-| 難所(sol) | 複雑なリファクタ、原因不明の障害、高い退行リスク | `-m gpt-6-sol -c 'model_reasoning_effort="xhigh"'` |
+| 標準的な実装(terra) | 通常の機能追加・障害修正 | `-m gpt-6.1-sol -c 'model_reasoning_effort="medium"'` |
+| 横断的な標準実装(terra / high) | 複数レイヤー、状態遷移、DB移行、並行処理を伴う変更 | `-m gpt-6.1-sol -c 'model_reasoning_effort="high"'` |
+| 難所(sol) | 複雑なリファクタ、原因不明の障害、高い退行リスク | `-m gpt-6.1-sol -c 'model_reasoning_effort="xhigh"'` |
 | 最難関(ここ一番、astra) | レビュー可能な単位へ分割できない難所。または terra / sol ティアが `cause:"model"` で 2 回失敗した後の昇格 | `-m gpt-6-astra -c 'model_reasoning_effort="high"'`(週予算内で自動承認) |
-| 重要・高リスク(ここ一番、astra / max) | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'`(週予算内で自動承認。予算超過時は `gpt-6-sol / xhigh`) |
+| 重要・高リスク(ここ一番、astra / max) | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'`(週予算内で自動承認。予算超過時は `gpt-6.1-sol / xhigh`) |
 
-- 迷ったら `gpt-6-sol / medium`(terra ティア)。このスキルでは Claude Code が設計を確定してから実装を渡すため、標準実装で Astra をデフォルトにしない
+- 迷ったら `gpt-6.1-sol / medium`(terra ティア)。このスキルでは Claude Code が設計を確定してから実装を渡すため、標準実装で Astra をデフォルトにしない
 - Luna は「何を変更するか」「正解が何か」が明確な作業に限る。仕様解釈・設計判断・複数案の比較が必要なら Sol / medium(terra ティア)へ上げる
 - Sol / medium・high(terra ティア)は通常実装の主力。複数ファイルという理由だけで Astra に上げず、曖昧さ・影響範囲・退行リスクで判断する。難所(sol ティア)は同じ Sol の xhigh — モデルは同じで effort だけ上げる
 - Sol / xhigh(sol ティア)は難所の主系統。Astra の予算超過・不承認時の代替、設計のセカンドオピニオンなど深い read-only 相談の主力でもある(read-only 相談の標準は Sol / medium、深い根本原因調査は xhigh)
 - セッション継続(文脈の再利用)を理由に、小変更を xhigh / max の resume で続けない。小変更は現状と変更点を指示書に書き、新規セッションを luna / terra ティアで開く(`../lessons.md`「Codex」)
 - Astra を使いたくなる状態が続くのは、モデル不足ではなくタスク分割または指示書の不足を疑う(move-only・歴史化・置換バッチなど挙動不変の作業は、大きくても Sol / Luna)
-- **「重要・高リスク」ティア(gpt-6-astra / max)は難易度でなく重要度の軸**(ユーザー方針 2026-07-20)。司令塔が「自分でやった方が早い」と感じる重要対応こそここへ委任し、最深の推論を割いて司令塔はレビューに専念する(`../SKILL.md`「委任可否ゲート」)。`max` は TUI `/model` で対象モデルに表示され利用可能なことを確認してから使う(下記「max / ultra」)。モデルは利用できるが effort 指定が失敗する場合は `xhigh` → `high` へ落とす。予算超過で Astra を使えない重要対応は `gpt-6-sol / xhigh`(sol ティア)+ 独立レビューで担保する
-- **Astra canary 終了(2026-09-05〜09-19、182 件)**: 品質は良好(実装 163 件で採用率 98%・`cause:"model"` 5.5%。同期間の Terra high 21%・medium 10%)だが、週次クォータの消費が同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍(`~/.codex/sessions` の rate_limits からの推定)で、2 週間に週次枠を 4 回使い切った。以後は下記の使用条件と週予算で運用する。`note` の `canary` 記録は不要。Astra が使えない・不適な場合は `gpt-6-sol / xhigh` へ明示的にフォールバックする(自動では行わない)
-- 世代間の effort に正確な対応関係を仮定しない。GPT-5.5 と GPT-5.6 は公式に「no exact mapping」と明記されており、GPT-5.6 と GPT-6 の effort にも同値性を仮定しない(5.6 Terra / medium → GPT-6 Sol / medium は「同じ既定 effort」であって同じ計算量ではない)。旧設定の `high` / `xhigh` をそのまま移植せず、公式方針どおり必要な結果が出る最小の effort から試して委任ログで評価する。フォールバックの「同じ effort」は指定値の維持であり、推論深度やコストの同値性を意味しない
+- **「重要・高リスク」ティア(gpt-6-astra / max)は難易度でなく重要度の軸**(ユーザー方針 2026-07-20)。司令塔が「自分でやった方が早い」と感じる重要対応こそここへ委任し、最深の推論を割いて司令塔はレビューに専念する(`../SKILL.md`「委任可否ゲート」)。`max` は TUI `/model` で対象モデルに表示され利用可能なことを確認してから使う(下記「max / ultra」)。モデルは利用できるが effort 指定が失敗する場合は `xhigh` → `high` へ落とす。予算超過で Astra を使えない重要対応は `gpt-6.1-sol / xhigh`(sol ティア)+ 独立レビューで担保する
+- **Astra canary 終了(2026-09-05〜09-19、182 件)**: 品質は良好(実装 163 件で採用率 98%・`cause:"model"` 5.5%。同期間の Terra high 21%・medium 10%)だが、週次クォータの消費が同トークンあたり Terra の約 3〜4 倍・Sol の約 4〜5 倍(`~/.codex/sessions` の rate_limits からの推定)で、2 週間に週次枠を 4 回使い切った。以後は下記の使用条件と週予算で運用する。`note` の `canary` 記録は不要。Astra が使えない・不適な場合は `gpt-6.1-sol / xhigh` へ明示的にフォールバックする(自動では行わない)
+- 世代間の effort に正確な対応関係を仮定しない。GPT-5.5 と GPT-5.6 は公式に「no exact mapping」と明記されており、GPT-5.6 と GPT-6、GPT-6 と GPT-6.1 の effort にも同値性を仮定しない(5.6 Terra / medium → GPT-6 Sol / medium は「同じ既定 effort」であって同じ計算量ではない)。旧設定の `high` / `xhigh` をそのまま移植せず、公式方針どおり必要な結果が出る最小の effort から試して委任ログで評価する。フォールバックの「同じ effort」は指定値の維持であり、推論深度やコストの同値性を意味しない
 - **GPT-5.6 canary 完了(2026-07-10〜07-13)**: **GPT-5.6 全ティア昇格確定**。119件見直し(2026-07-13)時点で Terra は実装64件中62採用(非採用は capacity 失敗1と設計起因の一部採用1のみ)、Sol 3/3、Luna 3/3(仕様固定の機械的 UI 変更を3件とも一発で仕様どおり実装 — Luna の想定用途どおり)。以後の GPT-5.6 ティアは canary の note 記録なしの通常運用とし、モデル表の見直しは `../lessons.md`「ログの見直しと昇格条件」の更新条件(同じ組で3件以上の偏り)に従う
 
 ### Astra の使用条件と週予算(2026-09-19、ユーザー方針)
 
-- **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(GPT-6 Sol / xhigh が上限)
+- **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(GPT-6.1 Sol / xhigh が上限)
 - **effort は `high` か `max` のみ**。`low` / `medium` の Astra は使わない(その用途は Terra で足りる。canary 期間に `astra/medium` 37 件で 6.9 億トークンを消費した)
 - **週予算: 直近 7 日で 8,000 万トークンまたは 8 件**(どちらか早い方。`.env` の `ASTRA_WEEKLY_TOKEN_CAP` / `ASTRA_WEEKLY_COUNT_CAP`)。残量は `delegate-route --budget`
-- **承認は週予算で自動判定する(人間に聞かない。ユーザー方針 2026-09-27)**。`delegate-route` が Astra を推奨したとき、週予算内なら自動で承認し(`astra_approval_source:"budget_auto"`)、超過なら自動で `gpt-6-sol / xhigh` に切り替える。人間が自発的に使う/使わないと言った場合だけ `astra_approved` を facts に入れる(`"human"`)。fallback(signals なし)では自動承認しない。`delegate-run` は `-m gpt-6-astra` を、承認済み(`astra_approval_source` が `budget_auto` か `human`)の `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
-- 予算超過時は自動で `gpt-6-sol / xhigh`(sol ティア)。「超過を承知で使う」は人間が明示した場合(`astra_approved:true`)か `--force-astra` だけ
+- **承認は週予算で自動判定する(人間に聞かない。ユーザー方針 2026-09-27)**。`delegate-route` が Astra を推奨したとき、週予算内なら自動で承認し(`astra_approval_source:"budget_auto"`)、超過なら自動で `gpt-6.1-sol / xhigh` に切り替える。人間が自発的に使う/使わないと言った場合だけ `astra_approved` を facts に入れる(`"human"`)。fallback(signals なし)では自動承認しない。`delegate-run` は `-m gpt-6-astra` を、承認済み(`astra_approval_source` が `budget_auto` か `human`)の `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
+- 予算超過時は自動で `gpt-6.1-sol / xhigh`(sol ティア)。「超過を承知で使う」は人間が明示した場合(`astra_approved:true`)か `--force-astra` だけ
 - 手順は `../SKILL.md`「ティア判定と確定ループ」
 
 ### GPT-6 Astra の max / ultra(例外扱い)
@@ -52,8 +52,9 @@
 
 | 主系統 | フォールバック |
 |---|---|
-| `gpt-6-astra` | `gpt-6-sol`(xhigh) |
-| `gpt-6-sol` | `gpt-5.6-sol`(旧世代の難所モデル。2026-09-23 時点で提供中、説明は「Older coding model」) |
+| `gpt-6-astra` | `gpt-6.1-sol`(xhigh) |
+| `gpt-6.1-sol` | `gpt-6-sol`(前世代。2026-09-30 時点で提供中、説明は「Previous generation workhorse model」) |
+| `gpt-6-sol` | `gpt-5.6-sol`(旧世代の難所モデル。説明は「Older generation workhorse model」) |
 | `gpt-6-luna` | `gpt-5.6-luna`(「Older fast and efficient model」) |
 | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | `gpt-5.5`(前世代 frontier。**2026-10-14 に Codex から退役**、公式の移行先は GPT-5.6 Sol) |
 
@@ -71,7 +72,7 @@ jq -r '.models[] | select(.visibility == "list") | "\(.slug)\t\(.priority)\t\(.d
 ```
 
 - `visibility` が `list` 以外(`hide`)のモデルは委任に使わない(`gpt-reserve` / `codex-auto-review` を含む)
-- `-m` が「not supported when using Codex with a ChatGPT account」で失敗したら、上記キャッシュに加えてユーザーに TUI の `/model` で現行一覧を確認してもらう
+- `-m` が「not supported when using Codex with a ChatGPT account」で失敗したら、まず CLI の版を疑う(`../SKILL.md`「モデルが使えないとき(CLI の更新)」)。更新しても失敗するなら、上記キャッシュに加えてユーザーに TUI の `/model` で現行一覧を確認してもらう
 - モデル表と実態がずれていたら、この確認結果をもとに表を更新する
 
 ## canonical command(書き込み委任)
@@ -113,8 +114,8 @@ codex exec \
 ```
 
 - 質問ファイルの締めは相談用に差し替える: 「確認や質問は不要です。リポジトリの読み取り・検索は積極的に行ってください(禁止はファイルの作成・変更のみ)。具体的な提案・修正案・コード例まで自主的に出力してください。」(禁止文言だけ書くと read-only を過解釈して repo 未読のまま回答される — 2026-07-12 実測)
-- ティアの目安: 軽い相談(仕様確認・小さな疑問)は `gpt-6-luna / medium` でクォータを節約。標準的な相談は `gpt-6-sol / medium`、設計のセカンドオピニオンなど深い相談は `gpt-6-sol / xhigh`(effort は低めから試す)
-- 詳細設計ドラフト関連の目安: 設計済み方針の実装可能性確認は `gpt-6-sol / high`、複雑な設計の落とし穴・移行・並行処理のレビューは `gpt-6-sol / xhigh`、分割不能な最難関の技術設計レビューも `gpt-6-sol / xhigh` を上限とする(Astra は相談・レビューに使わない)。大規模読解を含む第一ドラフトは Antigravity に置き、Codex は「実装担当視点で詳細設計をレビューする」役割に限る(最終設計は確定させない)
+- ティアの目安: 軽い相談(仕様確認・小さな疑問)は `gpt-6-luna / medium` でクォータを節約。標準的な相談は `gpt-6.1-sol / medium`、設計のセカンドオピニオンなど深い相談は `gpt-6.1-sol / xhigh`(effort は低めから試す)
+- 詳細設計ドラフト関連の目安: 設計済み方針の実装可能性確認は `gpt-6.1-sol / high`、複雑な設計の落とし穴・移行・並行処理のレビューは `gpt-6.1-sol / xhigh`、分割不能な最難関の技術設計レビューも `gpt-6.1-sol / xhigh` を上限とする(Astra は相談・レビューに使わない)。大規模読解を含む第一ドラフトは Antigravity に置き、Codex は「実装担当視点で詳細設計をレビューする」役割に限る(最終設計は確定させない)
 - **Web 調査が目的の相談は codex に投げない**(web_search を切って使うため)
 
 ## resume(継続・修正指示)
@@ -143,7 +144,7 @@ codex exec resume <SESSION_ID> \
 
 ## セットアップ・認証(失敗した時だけ確認)
 
-- `codex --version` — 未導入/リンク切れなら `brew reinstall --cask codex` を提示
+- `codex --version` — 未導入/リンク切れなら `npm i -g @openai/codex@<版>` を提示(2026-09-30 に brew cask から npm へ移行。npm の global prefix は `/opt/homebrew` なので、brew cask 版が残っているとシンボリックリンクがぶつかる)
 - `codex login status` — 未認証なら、ユーザー自身のターミナルで `codex login` を実行してもらう(ブラウザ認証のため代行不可)
 - 「failed to spawn code-mode host /opt/homebrew/bin/codex-code-mode-host」でファイルを読めない場合(回答は返るがリポジトリ未読になる): バイナリは ChatGPT.app に同梱されている。`ln -s "/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host" /opt/homebrew/bin/codex-code-mode-host` で復旧(2026-07-10 実測。`-c 'features.unified_exec=false'` では回避できない)。**委任先の回答冒頭に「実読できなかった」等の自己申告がないか毎回確認する**
 

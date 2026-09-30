@@ -6,8 +6,8 @@ BIN="$(cd "$(dirname "$0")" && pwd)/delegate-route"
 PROD_MODELS_FILE="$(dirname "$BIN")/../models.json"
 # 本番台帳を更新するときは、同じコミットでこの期待値も更新する。
 PROD_TIER_LUNA="gpt-6-luna"
-PROD_TIER_TERRA="gpt-6-sol"
-PROD_TIER_SOL="gpt-6-sol"
+PROD_TIER_TERRA="gpt-6.1-sol"
+PROD_TIER_SOL="gpt-6.1-sol"
 PROD_TIER_ASTRA="gpt-6-astra"
 PASS=0; FAIL=0
 
@@ -77,6 +77,12 @@ assert_j "本番台帳: luna のモデル ID" '.tiers.luna.model' "$PROD_TIER_LU
 assert_j "本番台帳: terra のモデル ID" '.tiers.terra.model' "$PROD_TIER_TERRA"
 assert_j "本番台帳: sol のモデル ID" '.tiers.sol.model' "$PROD_TIER_SOL"
 assert_j "本番台帳: astra のモデル ID" '.tiers.astra.model' "$PROD_TIER_ASTRA"
+assert_j "本番台帳: GPT-6.1 Sol は利用可能" '.models["gpt-6.1-sol"].status' "available"
+assert_j "本番台帳: GPT-6.1 Sol の fallback" '.models["gpt-6.1-sol"].fallback' "gpt-6-sol"
+assert_j "本番台帳: Astra の fallback" '.models["gpt-6-astra"].fallback' "$PROD_TIER_SOL"
+assert_j "本番台帳: judge の解決先" '.claude_agent.roles.judge.resolved' "claude-sonnet-5-5"
+assert_j "本番台帳: review の解決先" '.claude_agent.roles.review.resolved' "claude-opus-5-5"
+assert_j "本番台帳: review に旧 pin は無い" '.claude_agent.roles.review | has("pin_for_opus_5_5")' "false"
 assert_j "本番台帳: efforts_allowed は efforts_supported の部分集合" \
   '[. as $ledger | .tiers[] | . as $tier | $tier.efforts_allowed[] | . as $effort | ($ledger.models[$tier.model].efforts_supported | index($effort) != null)] | all' "true"
 assert_j "本番台帳: default_effort は efforts_allowed に含まれる" \
@@ -86,6 +92,10 @@ assert_j "本番台帳: fallback は null または models に存在する" \
 PROD_RUN_DIR="$TMP/prod-ledger-repo"; mkdir -p "$PROD_RUN_DIR"; git -C "$PROD_RUN_DIR" init -q
 runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --force-astra --cli codex --mode write --model "$PROD_TIER_ASTRA" --effort high --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
 assert_exit "本番台帳: delegate-run のスキーマ検証を通る" 0
+for EFFORT in xhigh medium; do
+  runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --cli codex --mode write --model "$PROD_TIER_SOL" --effort "$EFFORT" --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
+  assert_exit "本番台帳: GPT-6.1 Sol/$EFFORT の effort 検査を通る" 0
+done
 
 # ── signals 検証 ───────────────────────────────────────
 runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig 'del(.mechanical)')"
@@ -335,7 +345,7 @@ assert_j "予算超過: 不一致の formula は切替前の Astra" '.tier_disag
 assert_j "予算超過: 不一致を記録しても実際の推奨は Sol" '.recommend.model' "gpt-5.6-sol"
 
 run env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"high_stakes":true}'
-assert_j "fallback: 本番台帳で Astra 相当は Sol/xhigh" '.recommend.model + "/" + .recommend.effort' "gpt-6-sol/xhigh"
+assert_j "fallback: 本番台帳で Astra 相当は Sol/xhigh" '.recommend.model + "/" + .recommend.effort' "$PROD_TIER_SOL/xhigh"
 assert_j "fallback: 本番台帳でも自動承認なし" '.astra_approval_source' "null"
 
 # ── 内容の確定条件 ────────────────────────────────────

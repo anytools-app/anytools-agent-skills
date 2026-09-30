@@ -78,7 +78,7 @@ Claude Code(delegate スキル):
 1. 委任可否ゲート → 委任対象と判定、リスク=高(認証)
 2. ベースライン計測(typecheck / テスト / git status)
 3. 実装指示書を scratchpad に作成(変更するユーザー可視挙動・スコープ外を明記)
-4. bin/delegate-run --cli codex --mode write --model gpt-6-sol --effort medium \
+4. bin/delegate-run --cli codex --mode write --model gpt-6.1-sol --effort medium \
      --cd /path/to/repo --prompt-file instruction.md
 5. マニフェスト照合 + git diff 全読み + ベースライン比較
 6. 高リスクのため Antigravity にブラインド独立レビューを依頼
