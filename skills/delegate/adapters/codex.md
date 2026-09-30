@@ -16,8 +16,8 @@
 | 標準的な実装(terra) | 通常の機能追加・障害修正 | `-m gpt-6-sol -c 'model_reasoning_effort="medium"'` |
 | 横断的な標準実装(terra / high) | 複数レイヤー、状態遷移、DB移行、並行処理を伴う変更 | `-m gpt-6-sol -c 'model_reasoning_effort="high"'` |
 | 難所(sol) | 複雑なリファクタ、原因不明の障害、高い退行リスク | `-m gpt-6-sol -c 'model_reasoning_effort="xhigh"'` |
-| 最難関(ここ一番、astra) | レビュー可能な単位へ分割できない難所。または terra / sol ティアが `cause:"model"` で 2 回失敗した後の昇格 | `-m gpt-6-astra -c 'model_reasoning_effort="high"'`(人間承認+週予算) |
-| 重要・高リスク(ここ一番、astra / max) | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'`(人間承認+週予算。予算超過時は `gpt-6-sol / xhigh`) |
+| 最難関(ここ一番、astra) | レビュー可能な単位へ分割できない難所。または terra / sol ティアが `cause:"model"` で 2 回失敗した後の昇格 | `-m gpt-6-astra -c 'model_reasoning_effort="high"'`(週予算内で自動承認) |
+| 重要・高リスク(ここ一番、astra / max) | 委任インフラ・ログ健全性・リリース・不可逆操作・認証/課金/セキュリティ。難易度でなく**重要度**で選ぶ軸 | `-m gpt-6-astra -c 'model_reasoning_effort="max"'`(週予算内で自動承認。予算超過時は `gpt-6-sol / xhigh`) |
 
 - 迷ったら `gpt-6-sol / medium`(terra ティア)。このスキルでは Claude Code が設計を確定してから実装を渡すため、標準実装で Astra をデフォルトにしない
 - Luna は「何を変更するか」「正解が何か」が明確な作業に限る。仕様解釈・設計判断・複数案の比較が必要なら Sol / medium(terra ティア)へ上げる
@@ -35,8 +35,8 @@
 - **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(GPT-6 Sol / xhigh が上限)
 - **effort は `high` か `max` のみ**。`low` / `medium` の Astra は使わない(その用途は Terra で足りる。canary 期間に `astra/medium` 37 件で 6.9 億トークンを消費した)
 - **週予算: 直近 7 日で 8,000 万トークンまたは 8 件**(どちらか早い方。`.env` の `ASTRA_WEEKLY_TOKEN_CAP` / `ASTRA_WEEKLY_COUNT_CAP`)。残量は `delegate-route --budget`
-- **毎回、人間の承認を取る**。`delegate-route` が Astra を推奨しても、承認の質問(今週の消費と代替案つき)を経るまで確定しない。`delegate-run` は `-m gpt-6-astra` を、人間承認済みの `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
-- 予算超過時の既定は `gpt-6-sol / xhigh`(sol ティア)。「超過を承知で使う」は人間だけが選べる
+- **承認は週予算で自動判定する(人間に聞かない。ユーザー方針 2026-09-27)**。`delegate-route` が Astra を推奨したとき、週予算内なら自動で承認し(`astra_approval_source:"budget_auto"`)、超過なら自動で `gpt-6-sol / xhigh` に切り替える。人間が自発的に使う/使わないと言った場合だけ `astra_approved` を facts に入れる(`"human"`)。fallback(signals なし)では自動承認しない。`delegate-run` は `-m gpt-6-astra` を、承認済み(`astra_approval_source` が `budget_auto` か `human`)の `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
+- 予算超過時は自動で `gpt-6-sol / xhigh`(sol ティア)。「超過を承知で使う」は人間が明示した場合(`astra_approved:true`)か `--force-astra` だけ
 - 手順は `../SKILL.md`「ティア判定と確定ループ」
 
 ### GPT-6 Astra の max / ultra(例外扱い)

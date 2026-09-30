@@ -574,7 +574,7 @@ if [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ] && [ "$FORCE_ASTRA" -eq 
   warn "Astra ゲートを --force-astra で強行した(delegate-route の承認を経ていない)。委任ログの note に理由を書くこと"
 fi
 if [ "$FORCE_ASTRA" -eq 0 ] && [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ]; then
-  ASTRA_HINT="Astra(gpt-6-astra)は delegate-route の承認を先に通す: delegate-route --instruction <指示書> --kind 実装 --signals '{…}' → 質問に答えて --route-id <id> --human-facts '{\"astra_approved\":true}' で再判定 → gate=confirmed になった route_id を --route-id に渡す。承認済みと分かっている場合のみ --force-astra で強行する(--force は cooldown 専用でこのゲートには効かない)"
+  ASTRA_HINT="Astra(gpt-6-astra)は delegate-route の確定済み route が必要: delegate-route --instruction <指示書> --kind 実装 --signals '{…}' で判定し(週予算内なら自動承認、超過なら Sol に切り替わる)、gate=confirmed かつ astra_approved=true の route_id を --route-id に渡す。人間が明示的に承認した場合のみ --force-astra で強行する(--force は cooldown 専用でこのゲートには効かない)"
   [ -n "$ROUTE_ID" ] || die "Astra の実行には --route-id が必要。$ASTRA_HINT"
   [ -s "$ROUTE_DECISIONS" ] || die "route-decisions.jsonl が存在しないか空(--route-id $ROUTE_ID)。$ASTRA_HINT"
   ROUTE_LINE="$(jq -Rrc --arg r "$ROUTE_ID" \

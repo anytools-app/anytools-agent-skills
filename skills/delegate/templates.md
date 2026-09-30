@@ -133,7 +133,7 @@
 ```markdown
 # ティア判定依頼
 
-あなたは実装指示書を読み、下の 11 問に数値で答える判定者です。実装・助言・指示書の修正はしません。指示書に書かれていることだけを根拠にし、書かれていないことを好意的に補完しないでください(書かれていない=未確定として扱う)。
+あなたは実装指示書を読み、下の 11 問に数値で答え、決めどころを列挙する判定者です。実装・助言・指示書の修正はしません。指示書に書かれていることだけを根拠にし、書かれていないことを好意的に補完しないでください(書かれていない=未確定として扱う)。
 
 ## 指示書
 <指示書の絶対パス。読み取りのみ。指示書が参照するコードを開いて規模感を確かめてよい>
@@ -157,16 +157,18 @@ noul は「はい」である確率(0〜1)。判断材料が指示書に無い�
 9. behavior_defined(noul): 変更後のユーザー可視挙動・仕様値が一意に決まっているか(実装者の裁量に残っていないか)
 10. done_defined(noul): 完了条件と検証コマンド(ベースライン込み)が書かれているか
 11. product_decision(noul): 未確認の製品判断(成功/失敗の意味、表示条件、課金・コスト、データ保持、権限、後方互換、一意に決まらない文言・UX)が含まれるか
+12. decisions: 指示書から一意に決まらず、人間が決めるべき判断を列挙する。kind:"spec" = 仕様の判断(挙動・仕様値・製品判断)、kind:"approach" = 実装方針が複数ありえて結果・保守性が変わる分岐。各項目は具体的な question と 2 つ以上の options(label と tradeoff)、recommended を付ける。影響範囲・修正ファイル・テスト方法・モデルの選択など、コードを読めば決まる技術判断は含めない(notes に推定を書く)。無ければ []
 
 ## 出力形式
 
-次の JSON だけを出力してください(前後に文章を付けない)。続けて `notes` に、0.2〜0.8 の noul と confidence 0.9 未満の各項目について「指示書のどこが足りない/割れるのか」を 1 行ずつ書いてください(司令塔が人間への質問を具体化する材料になります)。
+次の JSON だけを出力してください(前後に文章を付けない)。続けて `notes` に、0.2〜0.8 の noul と confidence 0.9 未満の各項目について「指示書のどこが足りない/割れるのか」を 1 行ずつ書いてください(司令塔が指示書を補完する材料になります)。
 
 {"judge":"claude-agent:sonnet",
  "difficulty":{"score":0,"confidence":0},"regression":{"score":0,"confidence":0},"ambiguity":{"score":0,"confidence":0},
  "mechanical":0,"high_stakes":0,"splittable":0,
  "tier":{"choice":"terra","confidence":0},
  "scope_defined":0,"behavior_defined":0,"done_defined":0,"product_decision":0,
+ "decisions":[{"id":"overflow_behavior","kind":"spec","question":"上限件数を超えたときの挙動はどれにしますか?","options":[{"label":"切り捨てる","tradeoff":"超過分を処理しない"},{"label":"エラーにする","tradeoff":"呼び出し側で対処が必要"}],"recommended":"切り捨てる"}],
  "notes":{"<項目名>":"<足りない点>"}}
 
 ---
@@ -175,6 +177,6 @@ noul は「はい」である確率(0〜1)。判断材料が指示書に無い�
 
 **記入時の注意**
 
-1. 出力 JSON から `notes` を除いたものを signals ファイルとして保存し `delegate-route --signals` に渡す(`notes` は質問文の具体化に使う)
+1. 出力 JSON から `notes` だけを除いたものを signals ファイルとして保存し `delegate-route --signals` に渡す(`decisions` は signals に残す。`notes` は司令塔が指示書を補う材料に使う)
 2. 指示書を書き換えたら判定をやり直す(`human_facts` に `instruction_changed:true` を入れ、新しい signals を渡す)。判定者には前回の判定結果を見せない
-3. 判定の委任は軽量なので委任ログには記録しない(記録は `route-decisions.jsonl` が持つ)。Jev など別の判定器へ差し替えるときも、この 11 問と出力スキーマを保つ
+3. 判定の委任は軽量なので委任ログには記録しない(記録は `route-decisions.jsonl` が持つ)。Jev など別の判定器へ差し替えるときも、この 11 問と decisions を含む出力スキーマを保つ
