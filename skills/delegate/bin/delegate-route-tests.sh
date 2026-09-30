@@ -49,6 +49,16 @@ assert_contains() { case "$OUT" in *"$2"*) ok ;; *) ng "$1(期待文字列なし
 assert_not_contains() { case "$OUT" in *"$2"*) ng "$1(禁止文字列あり: $2)" ;; *) ok ;; esac; }
 jget() { printf '%s' "$OUT" | jq -r "$1" 2>/dev/null; }
 assert_j() { V="$(jget "$2")"; [ "$V" = "$3" ] && ok || ng "$1($2 = $V / 期待 $3)"; }
+assert_gather_fact_closes() {  # $1=軸 $2=期待値 $3=route_id。案内文から facts を無加工で渡す。
+  local axis="$1" expected="$2" route_id="$3" facts
+  facts="$(jget '.open[0].question | split("--human-facts \u0027")[1] | split("\u0027")[0]')"
+  if [ -z "$facts" ] || [ "$facts" = "null" ]; then ng "gather $axis: 案内文から facts を抽出できる"; return; fi
+  ok
+  run "$BIN" --route-id "$route_id" --human-facts "$facts"
+  assert_exit "gather $axis: 案内文の facts をそのまま受理" 0
+  assert_j "gather $axis: 案内文の値は閉じる値" ".human_facts.$axis" "$expected"
+  assert_j "gather $axis: 再判定で軸が open から消える" "[.open[] | select(.reason==\"$axis\")] | length" "0"
+}
 
 BASE='{"judge":"claude-agent:sonnet",
  "difficulty":{"score":2.1,"confidence":0.92},
@@ -102,6 +112,29 @@ assert_exit "signals: JSON でなければ exit 2" 2
 runE "$BIN" --instruction "$INSTR" --kind 発明 --signals "$(sig)"
 assert_exit "kind: 許容外は exit 2" 2
 
+# decisions は任意。存在する場合だけ構造と選択肢を検証する。
+DECISION='{"id":"overflow_behavior","kind":"spec","question":"超過時は?","options":[{"label":"切り捨てる","tradeoff":"超過分は失う"},{"label":"エラー","tradeoff":"呼び出し側で対処"}],"recommended":"エラー","why_unresolved":"指示なし"}'
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig)"
+assert_j "decisions: キーがない旧 signals を受理" '.gate' "confirmed"
+for EXPR in \
+  '.decisions = {}' \
+  '.decisions = [{id:"bad-id",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}]},{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""},{label:"A",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}],recommended:"C"}]' \
+  '.decisions = [{id:"a",kind:"other",question:"Q",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"",options:[{label:"A",tradeoff:""},{label:"B",tradeoff:""}]}]' \
+  '.decisions = [{id:"a",kind:"spec",question:"Q",options:[{label:"A",tradeoff:0},{label:"B",tradeoff:""}]}]'; do
+  runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$EXPR")"
+  assert_exit "decisions: 不正な構造を exit 2 にする($EXPR)" 2
+  assert_contains "decisions: signals 検証エラーを出す" "signals 検証: decisions"
+done
+runE "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"decision_answers":{"a":""}}'
+assert_exit "decision_answers: 空文字列を拒否" 2
+runE "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"decision_answers":[]}'
+assert_exit "decision_answers: オブジェクト以外を拒否" 2
+
 runE "$BIN" --instruction "$TMP/no-such.md" --kind 実装 --signals "$(sig)"
 assert_exit "指示書が無ければ exit 2" 2
 
@@ -111,7 +144,7 @@ assert_exit "基本形: 判定できたら exit 0" 0
 assert_j "基本形: terra/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/high"
 assert_j "基本形: gate confirmed" '.gate' "confirmed"
 assert_j "基本形: 推奨と一致なら不一致の記録は null" '.tier_disagreement' "null"
-assert_j "台帳: policy_version" '.policy_version' "0.27.0"
+assert_j "台帳: policy_version" '.policy_version' "0.28.0"
 assert_j "台帳: ledger_version" '.ledger_version' "2026-09-22.1"
 assert_j "台帳: available なら理由は null" '.unavailable_reason' "null"
 assert_j "alternatives: terra/high → sol/high" '.alternatives | tojson' '[{"model":"gpt-5.6-sol","effort":"high"}]'
@@ -176,21 +209,21 @@ done
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.9 | .tier.choice = "astra"')"
 assert_j "kind=実装: Astra 候補は残る" '.astra_candidate' "true"
 
-# ── Astra 承認: 予算内でも必ず聞く / true・false の扱い ──
+# ── Astra 承認: 予算内は自動 / human_facts は優先 ──
 ASTRA_SIG="$(sig '.high_stakes = 0.9 | .tier.choice = "astra"')"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
-assert_j "astra: 確定域でも ask_human" '.gate' "ask_human"
-assert_j "astra: astra_approval を出す" '[.open[] | select(.reason=="astra_approval")] | length' "1"
-assert_j "astra: 質問は model 軸" '[.open[] | select(.reason=="astra_approval")][0].axis' "model"
-assert_contains "astra: 質問文に週の消費" "今週 0/8 件・0M/80M"
-assert_j "astra: 予算内の選択肢" '[.open[] | select(.reason=="astra_approval")][0].options | join("|")' "Astra を使う|Sol で代替|分割して Terra"
-assert_j "astra: astra_approval は open の最後" '.open[-1].reason' "astra_approval"
+assert_j "astra: 予算内は confirmed" '.gate' "confirmed"
+assert_j "astra: 承認質問なし" '.open | tojson' '[]'
+assert_j "astra: 自動承認済み" '.astra_approved' "true"
+assert_j "astra: 承認元は budget_auto" '.astra_approval_source' "budget_auto"
+assert_j "astra: 予算集計は維持" '.budget.astra_count_7d' "0"
 RID_ASTRA="$(jget '.route_id')"
 
 run "$BIN" --route-id "$RID_ASTRA" --human-facts '{"astra_approved":true}'
 assert_j "astra_approved=true: astra のまま" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
 assert_j "astra_approved=true: confirmed" '.gate' "confirmed"
 assert_j "astra_approved=true: 出力に反映" '.astra_approved' "true"
+assert_j "astra_approved=true: 承認元は human" '.astra_approval_source' "human"
 assert_j "astra_approved=true: round が進む" '.round' "2"
 
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
@@ -198,11 +231,27 @@ RID_ASTRA2="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_ASTRA2" --human-facts '{"astra_approved":false}'
 assert_j "astra_approved=false: sol/high に落とす" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
 assert_j "astra_approved=false: confirmed" '.gate' "confirmed"
+assert_j "astra_approved=false: 承認元は human" '.astra_approval_source' "human"
 assert_j "astra_approved=false: 再質問しない" '[.open[] | select(.reason=="astra_approval")] | length' "0"
 assert_j "astra_approved=false: Sol への切替で不一致を作らない" '.tier_disagreement' "null"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.9')" --human-facts '{"astra_approved":false}'
 assert_j "astra_approved=false: 切替前の推奨を不一致に記録" '.tier_disagreement | tojson' '{"judge":"terra","judge_confidence":0.9,"formula":"astra","gap":2}'
 assert_j "astra_approved=false: 実際の推奨は Sol" '.recommend.model' "gpt-5.6-sol"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig)" --human-facts '{"astra_approved":true}'
+assert_j "非 Astra 推奨: 従来どおり人間の承認 fact を記録" '.astra_approved' "true"
+assert_j "非 Astra 推奨: 承認元は null" '.astra_approval_source' "null"
+
+# budget_auto の記録を delegate-run の実際の Astra ゲートへ渡す。
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
+RID_AUTO="$(jget '.route_id')"
+assert_j "astra: 実行用 route は budget_auto" '.astra_approval_source' "budget_auto"
+runE "$(dirname "$BIN")/delegate-run" --dry-run --cli codex --mode write \
+  --model gpt-6-astra --effort max --cd "$PROD_RUN_DIR" --prompt-file "$INSTR" --route-id "$RID_AUTO"
+assert_exit "astra: budget_auto route で delegate-run ゲート通過" 0
+assert_contains "astra: 実行コマンドに Astra を指定" "gpt-6-astra"
+runE "$(dirname "$BIN")/delegate-run" --dry-run --cli codex --mode write \
+  --model gpt-6-astra --effort high --cd "$PROD_RUN_DIR" --prompt-file "$INSTR" --route-id "$RID_AUTO"
+assert_exit "astra: budget_auto route でも effort 不一致を拒否" 2
 
 # ── 予算の境界 ────────────────────────────────────────
 bud() {  # $1=ログ本文(printf 済み文字列) → OUT に --budget の JSON
@@ -269,19 +318,25 @@ astra_rows 8 10000000 2026-09-19 > "$OVERDIR/delegation-log.jsonl"
 run env DELEGATE_LOG_DIR="$OVERDIR" "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
 assert_j "予算超過: 推奨は sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
 assert_j "予算超過: Astra 候補のまま" '.astra_candidate' "true"
-assert_j "予算超過: ask_human" '.gate' "ask_human"
-assert_j "予算超過: 選択肢の先頭は Sol 代替" '[.open[] | select(.reason=="astra_approval")][0].options[0]' "Sol で代替(推奨)"
-assert_j "予算超過: 選択肢の末尾は超過承知" '[.open[] | select(.reason=="astra_approval")][0].options[-1]' "超過を承知で Astra を使う"
-assert_contains "予算超過: 質問文に消費量" "今週 8/8 件・80M/80M"
+assert_j "予算超過: confirmed" '.gate' "confirmed"
+assert_j "予算超過: 質問なし" '.open | tojson' '[]'
+assert_j "予算超過: 承認なし" '.astra_approved' "false"
+assert_j "予算超過: 承認元なし" '.astra_approval_source' "null"
+assert_j "予算超過: 消費量を保持" '.budget.astra_count_7d' "8"
 assert_j "予算超過: rules_applied" '.rules_applied | join(",")' "astra_budget_over"
 assert_j "予算超過: Sol への切替で不一致を作らない" '.tier_disagreement' "null"
 RID_OVER="$(jget '.route_id')"
 run env DELEGATE_LOG_DIR="$OVERDIR" "$BIN" --route-id "$RID_OVER" --human-facts '{"astra_approved":true}'
 assert_j "予算超過 + astra_approved=true: astra のまま" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
 assert_j "予算超過 + astra_approved=true: confirmed" '.gate' "confirmed"
+assert_j "予算超過 + astra_approved=true: 承認元 human" '.astra_approval_source' "human"
 run env DELEGATE_LOG_DIR="$OVERDIR" "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.9')"
 assert_j "予算超過: 不一致の formula は切替前の Astra" '.tier_disagreement.formula' "astra"
 assert_j "予算超過: 不一致を記録しても実際の推奨は Sol" '.recommend.model' "gpt-5.6-sol"
+
+run env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"high_stakes":true}'
+assert_j "fallback: 本番台帳で Astra 相当は Sol/xhigh" '.recommend.model + "/" + .recommend.effort' "gpt-6-sol/xhigh"
+assert_j "fallback: 本番台帳でも自動承認なし" '.astra_approval_source' "null"
 
 # ── 内容の確定条件 ────────────────────────────────────
 for PAIR in "scope_defined|.scope_defined = 0.5" "behavior_defined|.behavior_defined = 0.5" \
@@ -289,23 +344,70 @@ for PAIR in "scope_defined|.scope_defined = 0.5" "behavior_defined|.behavior_def
             "ambiguity|.ambiguity.score = 2"; do
   AX="${PAIR%%|*}"; EXPR="${PAIR#*|}"
   run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$EXPR")"
-  case "$AX" in scope_defined|done_defined) EXPECT_GATE=gather_context; EXPECT_RESOLUTION=gather ;;
-    *) EXPECT_GATE=ask_human; EXPECT_RESOLUTION=ask ;; esac
+  EXPECT_GATE=gather_context; EXPECT_RESOLUTION=gather
   assert_j "内容軸 $AX: 未達で $EXPECT_GATE" '.gate' "$EXPECT_GATE"
   assert_j "内容軸 $AX: content 軸の質問が出る" "[.open[] | select(.reason==\"$AX\" and .axis==\"content\")] | length" "1"
   assert_j "内容軸 $AX: resolution" '.open[0].resolution' "$EXPECT_RESOLUTION"
 done
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.scope_defined = 0.5 | .high_stakes = 0.5')"
 assert_j "open の並び: content 軸が先頭" '.open[0].axis' "content"
-assert_j "open の並び: model 軸が後" '.open[1].reason' "high_stakes"
-assert_j "gather と ask の混在: ask_human" '.gate' "ask_human"
-assert_j "gather と ask の混在: resolution" '[.open[].resolution] | tojson' '["gather","ask"]'
+assert_j "open の並び: model 軸は出ない" '[.open[].axis] | tojson' '["content"]'
+assert_j "モデルと gather の混在: gather_context" '.gate' "gather_context"
+assert_j "モデルと gather の混在: high_stakes は自動採用" '.auto_decided | tojson' '["high_stakes"]'
+
+DECISIONS_SIG="$(printf '%s' "$BASE" | jq -c --argjson d "$DECISION" '.scope_defined = 0.5 | .behavior_defined = 0.5 | .done_defined = 0.5 | .product_decision = 0.5 | .ambiguity.score = 2 | .decisions = [$d, {id:"storage_policy",kind:"approach",question:"保存方式は?",options:[{label:"DB",tradeoff:"永続"},{label:"ファイル",tradeoff:"簡便"}],recommended:null}]')"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$DECISIONS_SIG"
+assert_j "decisions: ask_human" '.gate' "ask_human"
+assert_j "decisions: ask が先で signals 順" '[.open[].reason] | tojson' '["decision","decision","scope_defined","done_defined"]'
+assert_j "decisions: decision_id を保持" '.open[0].decision_id' "overflow_behavior"
+assert_j "decisions: kind を保持" '.open[1].kind' "approach"
+assert_j "decisions: 質問文を保持" '.open[0].question' "超過時は?"
+assert_j "decisions: 推奨選択肢を先頭に" '.open[0].options | tojson' '["エラー","切り捨てる"]'
+assert_j "decisions: tradeoff も同じ順" '.open[0].option_details | tojson' '[{"label":"エラー","tradeoff":"呼び出し側で対処"},{"label":"切り捨てる","tradeoff":"超過分は失う"}]'
+assert_j "decisions: recommended を保持" '.open[0].recommended' "エラー"
+assert_j "decisions: 推奨なしは null" '.open[1].recommended' "null"
+assert_j "decisions: decision は must_decide なし" '.open[0].must_decide' "false"
+RID_DECISIONS="$(jget '.route_id')"
+run "$BIN" --route-id "$RID_DECISIONS" --human-facts '{"decision_answers":{"overflow_behavior":"自由記述の案"}}'
+assert_j "decision_answers: 回答済み id を除外" '[.open[].decision_id] | map(select(. != null)) | tojson' '["storage_policy"]'
+assert_j "decision_answers: 回答は facts に保持" '.human_facts.decision_answers.overflow_behavior' "自由記述の案"
+assert_j "decision_answers: confirmed_axes に混ぜない" '.confirmed_axes | index("decision_answers")' "null"
+run "$BIN" --route-id "$RID_DECISIONS" --human-facts '{"decision_answers":{"storage_policy":"DB"}}'
+assert_j "decision_answers: 全回答後は内容軸の gather" '[.open[].reason] | tojson' '["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"]'
+assert_j "decision_answers: 全回答後は gather_context" '.gate' "gather_context"
+assert_j "decision_answers: 先行ラウンドの scope は must_decide" '.open[0].must_decide' "true"
+assert_j "decision_answers: decision は streak の対象でない" '[.open[] | select(.reason=="decision")] | length' "0"
+
+# 内容軸が確定域でも判定者の decision は必ず ask にする。推奨省略と null は同じ扱い。
+DECISIONS_CONFIRMED_SIG="$(sig '.behavior_defined = 0.95 | .product_decision = 0.05 | .ambiguity.score = 0.2 | .decisions = [
+  {id:"a",kind:"spec",question:"A?",options:[{label:"一案",tradeoff:"短い"},{label:"二案",tradeoff:"長い"}]},
+  {id:"b",kind:"approach",question:"B?",options:[{label:"先行",tradeoff:"速い"},{label:"後行",tradeoff:"安全"}],recommended:null}]')"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$DECISIONS_CONFIRMED_SIG"
+assert_j "decisions: 内容軸が確定域でも ask_human" '.gate' "ask_human"
+assert_j "decisions: 内容軸が確定域でも両 decision を出す" '[.open[].decision_id] | tojson' '["a","b"]'
+assert_j "decisions: recommended 省略と null は同じ" '[.open[].recommended] | tojson' '[null,null]'
+assert_j "decisions: recommended 省略でも元の選択肢順" '.open[0].options | tojson' '["一案","二案"]'
+assert_j "decisions: recommended null でも元の選択肢順" '.open[1].options | tojson' '["先行","後行"]'
+RID_DECISIONS_CONFIRMED="$(jget '.route_id')"
+run "$BIN" --route-id "$RID_DECISIONS_CONFIRMED" --human-facts '{"decision_answers":{"a":"x"}}'
+assert_j "decision_answers: a 回答後は b だけ ask" '[.open[].decision_id] | tojson' '["b"]'
+run "$BIN" --route-id "$RID_DECISIONS_CONFIRMED" --human-facts '{"decision_answers":{"b":"y"}}'
+assert_j "decision_answers: 部分マージ後は両方再質問しない" '.open | tojson' '[]'
+assert_j "decision_answers: 部分マージ後は confirmed" '.gate' "confirmed"
+assert_j "decision_answers: a の回答を保持" '.human_facts.decision_answers.a' "x"
+assert_j "decision_answers: b の回答を保持" '.human_facts.decision_answers.b' "y"
 
 # ── モデルの確定条件 ──────────────────────────────────
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.5')"
-assert_j "モデル軸: high_stakes 中間値は未確定" '[.open[] | select(.reason=="high_stakes" and .axis=="model")] | length' "1"
+assert_j "モデル軸: high_stakes 中間値でも質問なし" '.open | tojson' '[]'
+assert_j "モデル軸: high_stakes 中間値は自動採用" '.auto_decided | tojson' '["high_stakes"]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.mechanical = 0.5')"
-assert_j "モデル軸: mechanical 中間値は未確定" '[.open[] | select(.reason=="mechanical")] | length' "1"
+assert_j "モデル軸: mechanical 中間値でも質問なし" '.open | tojson' '[]'
+assert_j "モデル軸: mechanical 中間値は自動採用" '.auto_decided | tojson' '["mechanical"]'
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.5 | .splittable = 0.5 | .mechanical = 0.5 | .regression.score = 2 | .regression.confidence = 0.5 | .difficulty.score = 3.5 | .difficulty.confidence = 0.5')"
+assert_j "モデル軸: 複数未確定でも open は空" '.open | tojson' '[]'
+assert_j "モデル軸: auto_decided は指定順で重複なし" '.auto_decided | tojson' '["high_stakes","splittable","mechanical","regression","difficulty"]'
+assert_j "モデル軸: 複数未確定でも confirmed" '.gate' "confirmed"
 # difficulty は常に判定者の score を決定式へ渡し、従来質問になった条件だけ自動採用として記録する
 runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
 assert_j "difficulty: 低確信 + しきい値近傍(2.1)でも質問しない" '[.open[] | select(.reason=="difficulty")] | length' "0"
@@ -322,12 +424,12 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.sc
 assert_j "difficulty: 高確信なら近傍でも自動採用しない" '.auto_decided | tojson' '[]'
 
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.regression.score = 1.8 | .regression.confidence = 0.5')"
-assert_j "モデル軸: regression 低確信 + 2 近傍は未確定" '[.open[] | select(.reason=="regression")] | length' "1"
-assert_j "モデル軸: 信号ありの regression 質問文は維持" '.open[0].question' "退行時の被害の判定が確信に欠けます(score=1.8・confidence=0.5)。被害度を指定してください。"
+assert_j "モデル軸: regression 低確信 + 2 近傍も質問なし" '.open | tojson' '[]'
+assert_j "モデル軸: regression 低確信 + 2 近傍は自動採用" '.auto_decided | tojson' '["regression"]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.regression.confidence = 0.5')"
 assert_j "モデル軸: regression 低確信でも 2 から遠ければ聞かない(score=1.0)" '[.open[] | select(.reason=="regression")] | length' "0"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.regression.score = 1.5 | .regression.confidence = 0.5')"
-assert_j "モデル軸: regression の境界(1.5)は未確定" '[.open[] | select(.reason=="regression")] | length' "1"
+assert_j "モデル軸: regression の境界(1.5)は自動採用" '.auto_decided | tojson' '["regression"]'
 
 # difficulty / regression 以外の規則で推奨が決まる場合は、低確信でも両軸を聞かない
 PIVOT='.difficulty.score = 2.5 | .difficulty.confidence = 0.65 | .regression.score = 2 | .regression.confidence = 0.75'
@@ -345,8 +447,8 @@ assert_j "モデル軸: escalate 決定時は difficulty を聞かない" '[.ope
 assert_j "モデル軸: escalate 決定時は regression を聞かない" '[.open[] | select(.reason=="regression")] | length' "0"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$PIVOT | .tier.choice = \"sol\"")"
 assert_j "モデル軸: score 決定時も difficulty を質問しない" '[.open[] | select(.reason=="difficulty")] | length' "0"
-assert_j "モデル軸: score 決定時は difficulty を自動採用する" '.auto_decided | tojson' '["difficulty"]'
-assert_j "モデル軸: score 決定時は regression を従来どおり聞く" '[.open[] | select(.reason=="regression")] | length' "1"
+assert_j "モデル軸: score 決定時は regression と difficulty を自動採用する" '.auto_decided | tojson' '["regression","difficulty"]'
+assert_j "モデル軸: score 決定時も regression を聞かない" '[.open[] | select(.reason=="regression")] | length' "0"
 
 # 判定者と決定式が割れたら材料軸だけを確認し、確定済みなら決定式を採用する
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.confidence = 0.5')"
@@ -381,12 +483,12 @@ assert_j "不一致: 2段違いでも質問しない" '.open | tojson' '[]'
 assert_j "不一致: 2段違いも記録する" '.tier_disagreement.gap' "2"
 
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(printf '%s' "$DISAGREE_SIG" | jq -c '.regression.confidence = 0.5')"
-assert_j "不一致: しきい値から遠くても低確信なら regression を聞く" '.open[0].reason' "regression"
-assert_j "不一致: regression だけを聞く" '[.open[].reason] | tojson' '["regression"]'
-assert_j "不一致: 材料未確定なら ask_human" '.gate' "ask_human"
+assert_j "不一致: しきい値から遠い低確信 regression も質問なし" '.open | tojson' '[]'
+assert_j "不一致: regression は自動採用" '.auto_decided | tojson' '["regression"]'
+assert_j "不一致: 材料軸のまま confirmed" '.gate' "confirmed"
 RID_REG="$(jget '.route_id')"
 OUT="$(cat "$TMP/stderr")"
-assert_not_contains "不一致: 材料未確定なら採用済みとは補足しない" "材料軸は確定済み"
+assert_contains "不一致: モデル軸は司令塔が採用と補足" "材料軸は確定済み"
 run "$BIN" --route-id "$RID_REG" --human-facts '{"regression":2}'
 assert_j "不一致: 人間の regression 回答で Sol へ変わる" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
 assert_j "不一致: 回答で一致すれば null に戻る" '.tier_disagreement' "null"
@@ -394,14 +496,16 @@ assert_j "不一致: 回答済みなら confirmed" '.gate' "confirmed"
 for CONF in 0.899 0.9; do
   run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig ".tier.choice = \"sol\" | .regression.confidence = $CONF")"
   case "$CONF" in 0.899) EXPECT_OPEN=1 ;; *) EXPECT_OPEN=0 ;; esac
-  assert_j "不一致: regression の確信度境界($CONF)" '[.open[] | select(.reason=="regression")] | length' "$EXPECT_OPEN"
+  assert_j "不一致: regression の自動採用境界($CONF)" '[.auto_decided[] | select(.=="regression")] | length' "$EXPECT_OPEN"
+  assert_j "不一致: 確信度に関係なく質問なし($CONF)" '.open | tojson' '[]'
 done
 
 # Astra 承認だけで未確定の材料を確定扱いにしない。回答済みの材料は再質問しない。
 for APPROVAL in false true; do
   run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra" | .regression.confidence = 0.5')" \
     --human-facts "{\"astra_approved\":$APPROVAL}"
-  assert_j "不一致: astra_approved=$APPROVAL でも regression を聞く" '[.open[].reason] | tojson' '["regression"]'
+  assert_j "不一致: astra_approved=$APPROVAL でも regression を自動採用" '.auto_decided | tojson' '["regression"]'
+  assert_j "不一致: astra_approved=$APPROVAL でも質問なし" '.open | tojson' '[]'
 done
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra" | .regression.confidence = 0.5')" \
   --human-facts '{"high_stakes":false,"regression":1}'
@@ -410,9 +514,10 @@ assert_j "不一致: 回答済みでも不一致自体は記録する" '.tier_di
 assert_j "不一致: 材料回答済みなら confirmed" '.gate' "confirmed"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "astra" | .regression.confidence = 0.5')" \
   --human-facts '{"high_stakes":false,"difficulty":2.1}'
-assert_j "不一致: 別の材料への回答で regression を消さない" '[.open[].reason] | tojson' '["regression"]'
+assert_j "不一致: 別の材料への回答でも regression を自動採用" '.auto_decided | tojson' '["regression"]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.tier.choice = "sol" | .high_stakes = 0.5 | .mechanical = 0.5')"
-assert_j "不一致: high_stakes/mechanical は従来の条件で聞く" '[.open[].reason] | tojson' '["high_stakes","mechanical"]'
+assert_j "不一致: high_stakes/mechanical は質問せず自動採用" '.auto_decided | tojson' '["high_stakes","mechanical"]'
+assert_j "不一致: モデル軸の open は空" '.open | tojson' '[]'
 RID_MATERIAL="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_MATERIAL" --human-facts '{"high_stakes":false,"mechanical":true}'
 assert_j "不一致: mechanical 回答を決定式へ反映" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-luna/medium"
@@ -424,10 +529,10 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.splittable = 
 assert_j "splittable: difficulty<3.2 なら除外" '[.open[] | select(.reason=="splittable")] | length' "0"
 assert_j "splittable: 除外時は confirmed" '.gate' "confirmed"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 3.5 | .splittable = 0.5 | .tier.choice = "terra"')"
-assert_j "splittable: difficulty>=3.2 なら確定条件" '[.open[] | select(.reason=="splittable")] | length' "1"
+assert_j "splittable: difficulty>=3.2 なら自動採用" '.auto_decided | tojson' '["splittable"]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.score = 2.6 | .splittable = 0.5')"
 assert_j "splittable: 判定者 Terra と決定式 Sol が不一致" '.tier_disagreement.formula' "sol"
-assert_j "splittable: 不一致なら difficulty=2.6 でも聞く" '[.open[].reason] | tojson' '["splittable"]'
+assert_j "splittable: 不一致なら difficulty=2.6 でも自動採用" '.auto_decided | tojson' '["splittable"]'
 RID_SPLIT="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_SPLIT" --human-facts '{"splittable":true}'
 assert_j "splittable: 回答済みなら不一致のままでも confirmed" '.gate' "confirmed"
@@ -437,18 +542,19 @@ assert_j "splittable: 一致なら不一致の記録は null" '.tier_disagreemen
 for SCORE in 2.49 2.5; do
   run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig ".difficulty.score = $SCORE | .splittable = 0.5 | .tier.choice = \"astra\"")"
   case "$SCORE" in 2.49) EXPECT_OPEN=0 ;; *) EXPECT_OPEN=1 ;; esac
-  assert_j "splittable: 不一致時の difficulty 境界($SCORE)" '[.open[] | select(.reason=="splittable")] | length' "$EXPECT_OPEN"
+  assert_j "splittable: 不一致時の difficulty 境界($SCORE)" '[.auto_decided[] | select(.=="splittable")] | length' "$EXPECT_OPEN"
+  assert_j "splittable: 不一致時も質問なし($SCORE)" '.open | tojson' '[]'
 done
 for SPLIT in 0.2 0.21 0.79 0.8; do
   run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig ".difficulty.score = 2.6 | .splittable = $SPLIT")"
   case "$SPLIT" in 0.2|0.8) EXPECT_OPEN=0 ;; *) EXPECT_OPEN=1 ;; esac
-  assert_j "splittable: 不一致でも確定域の境界は同じ($SPLIT)" '[.open[] | select(.reason=="splittable")] | length' "$EXPECT_OPEN"
+  assert_j "splittable: 不一致でも自動採用の境界は同じ($SPLIT)" '[.auto_decided[] | select(.=="splittable")] | length' "$EXPECT_OPEN"
 done
 
 # ── human_facts: 優先・再質問しない・未知キー拒否 ──
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.5')"
 RID_HF="$(jget '.route_id')"
-assert_j "human_facts 前: high_stakes を聞く" '[.open[] | select(.reason=="high_stakes")] | length' "1"
+assert_j "human_facts 前: high_stakes は自動採用" '.auto_decided | tojson' '["high_stakes"]'
 run "$BIN" --route-id "$RID_HF" --human-facts '{"high_stakes":true}'
 assert_exit "human_facts: 再判定に成功" 0
 assert_j "human_facts: 信号を 1.0 に上書きし推奨が astra 候補へ" '.astra_candidate' "true"
@@ -494,7 +600,7 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig)"
 RID_TIER2="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TIER2" --human-facts '{"tier":"astra"}'
 assert_j "tier 指定 astra: high_stakes<0.8 なら high" '.recommend.effort' "high"
-assert_j "tier 指定 astra: 承認は別途必要" '[.open[] | select(.reason=="astra_approval")] | length' "1"
+assert_j "tier 指定 astra: 予算内は自動承認" '.astra_approval_source' "budget_auto"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.high_stakes = 0.9 | .tier.choice = "astra"')"
 RID_TIER3="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_TIER3" --human-facts '{"tier":"astra","astra_approved":true}'
@@ -511,6 +617,10 @@ RID_DC_DIFF="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_DC_DIFF" --human-facts '{"delegated_to_commander":["difficulty"]}'
 assert_j "delegated_to_commander: difficulty を自動採用しない" '.auto_decided | tojson' '[]'
 assert_j "delegated_to_commander: difficulty を confirmed_axes に載せる" '[.confirmed_axes[] | select(. == "difficulty")] | length' "1"
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.scope_defined = 0.5 | .behavior_defined = 0.5 | .done_defined = 0.5 | .product_decision = 0.5 | .ambiguity.score = 2')" \
+  --human-facts '{"delegated_to_commander":["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"]}'
+assert_j "delegated_to_commander: 内容の5軸を受理" '.gate' "confirmed"
+assert_j "delegated_to_commander: 5軸を記録" '.confirmed_axes | tojson' '["ambiguity","behavior_defined","done_defined","product_decision","scope_defined"]'
 runE "$BIN" --route-id "$RID_DC" --human-facts '{"delegated_to_commander":["astra_approval"]}'
 assert_exit "delegated_to_commander: astra_approval は拒否" 2
 assert_contains "delegated_to_commander: astra_approval を名指し" "astra_approval"
@@ -541,7 +651,8 @@ assert_contains "指示書改稿: 再判定方法を表示" "instruction_changed
 run "$BIN" --route-id "$RID_CHANGE" --signals "$ASTRA_SIG" --human-facts '{"instruction_changed":true}'
 assert_exit "指示書改稿: instruction_changed ありなら成功" 0
 assert_j "指示書改稿: 累積 astra_approved を除去" '.human_facts | has("astra_approved")' "false"
-assert_j "指示書改稿: Astra 承認を取り直す" '[.open[] | select(.reason=="astra_approval")] | length' "1"
+assert_j "指示書改稿: 新しいラウンドで予算内なら自動承認" '.astra_approval_source' "budget_auto"
+assert_j "指示書改稿: 旧承認は引き継がないが新承認は有効" '.astra_approved' "true"
 assert_j "指示書改稿: 新しい sha を記録" '.instruction_sha256' "$(shasum -a 256 "$INSTR_CHANGE" | awk '{print $1}')"
 
 INSTR_CHANGE_FALSE="$TMP/instr-change-false.md"
@@ -578,6 +689,8 @@ run "$BIN" --route-id "$RID_MD" --human-facts '{"mechanical":false}'
 assert_j "must_decide: round2 も立たない" '[.open[] | select(.reason=="behavior_defined")][0].must_decide' "false"
 run "$BIN" --route-id "$RID_MD" --human-facts '{"splittable":true}'
 assert_j "must_decide: round3 で立つ" '[.open[] | select(.reason=="behavior_defined")][0].must_decide' "true"
+assert_j "must_decide: 3 回目も gather" '.open[0].resolution' "gather"
+assert_j "must_decide: 3 回目も gather_context" '.gate' "gather_context"
 assert_j "must_decide: round 3" '.round' "3"
 
 # ── series: モデル軸だけ 24 時間保持する ──
@@ -592,6 +705,11 @@ OUT="$(cat "$DELEGATE_LOG_DIR/route-series.json")"
 assert_j "series: モデル軸(tier)を保持" '.S7.facts.tier' "sol"
 assert_j "series: astra_approved は保持しない" '.S7.facts | has("astra_approved")' "false"
 assert_j "series: 内容軸は保持しない" '.S7.facts | has("scope_defined")' "false"
+
+run "$BIN" --instruction "$INSTR" --kind 実装 --series-key S11 --signals "$(printf '%s' "$BASE" | jq -c --argjson d "$DECISION" '.behavior_defined = 0.5 | .decisions = [$d]')" --human-facts '{"decision_answers":{"overflow_behavior":"エラー"},"series_apply":true}'
+assert_j "series: decision_answers は route の facts に保持" '.human_facts.decision_answers.overflow_behavior' "エラー"
+OUT="$(cat "$DELEGATE_LOG_DIR/route-series.json")"
+assert_j "series: decision_answers は series に保持しない" '.S11.facts | has("decision_answers")' "false"
 
 run "$BIN" --instruction "$INSTR" --kind 実装 --series-key S7 --signals "$(sig '.difficulty.confidence = 0.3')"
 assert_j "series: 初回ラウンドから tier を適用" '.human_facts.tier' "sol"
@@ -608,99 +726,67 @@ jq '.S7.ts_epoch = 1' "$DELEGATE_LOG_DIR/route-series.json" > "$DELEGATE_LOG_DIR
 run "$BIN" --instruction "$INSTR" --kind 実装 --series-key S7 --signals "$(sig)"
 assert_j "series: 24 時間で失効する" '.human_facts | has("tier")' "false"
 
-# ── fallback: 3 軸の回答までは静的ルール、回答後は通常の決定式 ──
+# ── fallback: 質問なし。材料があれば擬似信号で決定式 ──
 run "$BIN" --instruction "$INSTR" --kind 実装
 assert_exit "fallback: signals 無しでも exit 0" 0
 assert_j "fallback: gate" '.gate' "fallback"
-assert_j "fallback: 高リスク語なしは terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-assert_j "fallback: 材料軸の 3 問を出す" '[.open[].reason] | tojson' '["mechanical","high_stakes","regression"]'
-assert_j "fallback: 全質問が model/ask" 'all(.open[]; .axis == "model" and .resolution == "ask")' "true"
-assert_j "fallback: mechanical の既存質問文" '.open[0].question' "この作業は挙動不変の機械的な作業(move-only・rename・整形)ですか?"
-assert_j "fallback: high_stakes の既存質問文" '.open[1].question' "この変更は重要・高リスク扱いにしますか?"
-assert_j "fallback: regression は被害度の目安を表示" '.open[2].question' "退行時の被害度を指定してください(0 内部のみ / 1 ユーザー可視 / 2 データ・課金・認証 / 3 不可逆)。"
-assert_j "fallback: regression の質問に null を表示しない" '.open[2].question | contains("null")' "false"
-assert_j "fallback: regression の被害度を尋ねる" '.open[2].question | contains("被害度を指定してください")' "true"
-assert_j "fallback: mechanical の既存選択肢" '.open[0].options | tojson' '["機械的な作業として扱う","通常の実装として扱う"]'
-assert_j "fallback: high_stakes の既存選択肢" '.open[1].options | tojson' '["高リスク扱いにする","通常扱いにする"]'
-assert_j "fallback: regression の既存選択肢" '.open[2].options | tojson' '["0","1","2","3"]'
+assert_j "fallback: facts なしは terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
+assert_j "fallback: 人間への質問ゼロ" '.open | tojson' '[]'
 assert_j "fallback: signals は null" '.signals' "null"
 assert_j "fallback: 不一致の記録は null" '.tier_disagreement' "null"
 assert_j "fallback: difficulty を自動採用しない" '.auto_decided | tojson' '[]'
 RID_FB="$(jget '.route_id')"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"mechanical":false}'
-assert_j "fallback: 回答済みの軸は再質問しない" '[.open[].reason] | tojson' '["high_stakes","regression"]'
-assert_j "fallback: 1 軸の回答では fallback のまま" '.gate' "fallback"
-assert_j "fallback: 1 軸の回答を確定軸として記録" '.confirmed_axes | tojson' '["mechanical"]'
-run "$BIN" --route-id "$RID_FB" --human-facts '{"high_stakes":false}'
-assert_j "fallback: 2 軸回答後は regression だけを聞く" '[.open[].reason] | tojson' '["regression"]'
-assert_j "fallback: 2 軸の回答では fallback のまま" '.gate' "fallback"
-run "$BIN" --route-id "$RID_FB" --human-facts '{"regression":1}'
-assert_j "fallback: 3 軸回答済みなら confirmed" '.gate' "confirmed"
-assert_j "fallback: 通常作業は terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-assert_j "fallback: 回答後の open は空" '.open | tojson' '[]'
-assert_j "fallback: 3 軸とも確定済みとして記録" '.confirmed_axes | tojson' '["high_stakes","mechanical","regression"]'
-assert_j "fallback: 擬似信号を判定者の信号として保存しない" '.signals' "null"
-assert_j "fallback: 擬似信号との不一致は記録しない" '.tier_disagreement' "null"
+assert_j "fallback: 1 軸だけでも決定式" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
+assert_j "fallback: 1 軸でも gate は fallback" '.gate' "fallback"
+assert_j "fallback: 1 軸の回答を記録" '.confirmed_axes | tojson' '["mechanical"]'
+assert_j "fallback: 回答しても質問ゼロ" '.open | tojson' '[]'
 run "$BIN" --route-id "$RID_FB" --human-facts '{"regression":2}'
-assert_j "fallback: regression=2 なら sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
-assert_j "fallback: regression=2 でも confirmed" '.gate' "confirmed"
+assert_j "fallback: 一部 facts の regression=2 で sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: regression だけでも fallback" '.gate' "fallback"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"mechanical":true}'
 assert_j "fallback: mechanical=true なら luna/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-luna/medium"
-assert_j "fallback: mechanical=true でも confirmed" '.gate' "confirmed"
+assert_j "fallback: mechanical=true でも fallback" '.gate' "fallback"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"mechanical":false,"high_stakes":true}'
-assert_j "fallback: high_stakes=true なら Astra 候補" '.astra_candidate' "true"
-assert_j "fallback: 高リスクなら astra/max" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
-assert_j "fallback: 高リスクなら承認だけを聞く" '[.open[].reason] | tojson' '["astra_approval"]'
-assert_j "fallback: 承認質問も model/ask" '.open[0].axis + "/" + .open[0].resolution' "model/ask"
-assert_j "fallback: Astra 承認待ちは fallback" '.gate' "fallback"
+assert_j "fallback: high_stakes=true は Astra 候補" '.astra_candidate' "true"
+assert_j "fallback: 承認なしは Sol/high(fixture の既定 effort)" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: Astra の質問もゼロ" '.open | tojson' '[]'
+assert_j "fallback: 自動承認しない" '.astra_approved' "false"
+assert_j "fallback: 承認元なし" '.astra_approval_source' "null"
+assert_j "fallback: Astra 相当も gate は fallback" '.gate' "fallback"
 run env ASTRA_WEEKLY_COUNT_CAP=0 "$BIN" --route-id "$RID_FB" --allow-unattended
-assert_j "fallback: 予算超過では sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
-assert_j "fallback: 予算超過でも Astra 候補のまま" '.astra_candidate' "true"
-assert_j "fallback: 予算超過でも承認を聞く" '[.open[].reason] | tojson' '["astra_approval"]'
-assert_j "fallback: 予算超過時の既存選択肢" '.open[0].options | tojson' '["Sol で代替(推奨)","分割して Terra","超過を承知で Astra を使う"]'
-assert_j "fallback: 推奨 Sol でも unattended で承認を省略しない" '.gate' "fallback"
-assert_j "fallback: 推奨 Sol でも unattended の印は立たない" '.unattended' "false"
+assert_j "fallback: 予算超過も Sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: 予算超過も質問ゼロ" '.open | tojson' '[]'
+assert_j "fallback: unattended でも fallback" '.gate' "fallback"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"astra_approved":true}'
-assert_j "fallback: 承認後は confirmed" '.gate' "confirmed"
-assert_j "fallback: 承認後は astra/max" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
+assert_j "fallback: 人間が承認すれば Astra/max" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
+assert_j "fallback: 人間の承認元" '.astra_approval_source' "human"
+assert_j "fallback: 人間の承認後も gate は fallback" '.gate' "fallback"
 run "$BIN" --route-id "$RID_FB" --human-facts '{"astra_approved":false}'
-assert_j "fallback: 承認拒否後は sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
-assert_j "fallback: 承認拒否後も confirmed" '.gate' "confirmed"
-
+assert_j "fallback: 人間が拒否すれば Sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: 人間の拒否後も gate は fallback" '.gate' "fallback"
 run "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"tier":"terra"}'
-assert_j "fallback: tier 指定で確定" '.gate' "confirmed"
+assert_j "fallback: tier 指定でも gate は fallback" '.gate' "fallback"
 assert_j "fallback: tier 指定が推奨になる" '.recommend.model' "gpt-5.6-terra"
-assert_j "fallback: tier 指定なら材料軸も聞かない" '.open | tojson' '[]'
-assert_j "fallback: tier 指定でも不一致の記録は null" '.tier_disagreement' "null"
-run "$BIN" --instruction "$INSTR" --kind 実装 \
-  --human-facts '{"mechanical":false,"high_stakes":false,"regression":1}'
-assert_j "fallback: 3 軸を一括で回答しても confirmed" '.gate' "confirmed"
-assert_j "fallback: 一括回答でも terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-run "$BIN" --instruction "$INSTR" --kind 実装 \
-  --human-facts '{"mechanical":false,"high_stakes":false,"regression":0,"scope_defined":false,"behavior_defined":false,"done_defined":false,"product_decision":true,"ambiguity":3}'
-assert_j "fallback: regression=0 も有効な回答" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-assert_j "fallback: 内容軸は評価せず open に出さない" '.open | tojson' '[]'
-run "$BIN" --instruction "$INSTR_MANY" --kind 実装 \
-  --human-facts '{"mechanical":true,"high_stakes":false,"regression":1}'
-assert_j "fallback: mechanical + 6 ファイルの既存規則を維持" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-run "$BIN" --instruction "$INSTR" --kind 調査 \
-  --human-facts '{"mechanical":false,"high_stakes":true,"regression":1}'
+assert_j "fallback: tier 指定でも質問ゼロ" '.open | tojson' '[]'
+run "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"tier":"astra"}'
+assert_j "fallback: 明示 tier astra でも自動承認しない" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: 明示 tier astra も gate は fallback" '.gate' "fallback"
+run "$BIN" --instruction "$INSTR" --kind 実装 --human-facts '{"mechanical":false,"high_stakes":false,"regression":1}'
+assert_j "fallback: 3 軸指定でも fallback" '.gate' "fallback"
+assert_j "fallback: 3 軸なら terra/medium" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
+run "$BIN" --instruction "$INSTR_MANY" --kind 実装 --human-facts '{"mechanical":true}'
+assert_j "fallback: mechanical + 6 ファイルの既存規則" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
+run "$BIN" --instruction "$INSTR" --kind 調査 --human-facts '{"high_stakes":true}'
 assert_j "fallback: 調査では高リスクでも sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
-assert_j "fallback: 調査では Astra 承認を聞かない" '.gate' "confirmed"
-run "$BIN" --instruction "$INSTR" --kind 実装 \
-  --human-facts '{"mechanical":false,"delegated_to_commander":["high_stakes"]}'
-assert_j "fallback: confirmed_axes に含まれる軸は再質問しない" '[.open[].reason] | tojson' '["regression"]'
-
+assert_j "fallback: 調査でも gate は fallback" '.gate' "fallback"
 run "$BIN" --instruction "$INSTR_RISK" --kind 実装
-assert_j "fallback: 高リスク語ありは sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
+assert_j "fallback: facts なしなら高リスク語で sol/high" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
 assert_j "fallback: risk_terms を出す" '.features.risk_terms | join(",")' "認証,auth"
 RID_FB_RISK="$(jget '.route_id')"
-run "$BIN" --route-id "$RID_FB_RISK" --human-facts '{"mechanical":true,"high_stakes":false}'
-assert_j "fallback: 3 軸が揃うまでは回答があっても静的推奨" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
-assert_j "fallback: 暫定推奨中は未回答の軸だけ聞く" '[.open[].reason] | tojson' '["regression"]'
-run "$BIN" --route-id "$RID_FB_RISK" --human-facts '{"mechanical":false,"regression":1}'
-assert_j "fallback: 3 軸回答後は risk_terms より決定式を採用" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-terra/medium"
-assert_j "fallback: 高リスク語があっても回答済みなら confirmed" '.gate' "confirmed"
+run "$BIN" --route-id "$RID_FB_RISK" --human-facts '{"mechanical":true}'
+assert_j "fallback: facts があれば静的推奨より決定式" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-luna/medium"
+assert_j "fallback: 擬似信号は保存しない" '.signals' "null"
 
 # ── allow-unattended ─────────────────────────────────
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$(sig '.difficulty.confidence = 0.5')"
@@ -710,19 +796,22 @@ run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$(
 assert_j "unattended: gather の内容軸が残るなら不可" '.gate' "gather_context"
 assert_j "unattended: 不可なら印も立たない" '.unattended' "false"
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$ASTRA_SIG"
-assert_j "unattended: 推奨が Astra なら不可" '.gate' "ask_human"
+assert_j "unattended: 予算内 Astra は自動承認" '.gate' "confirmed"
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended
 assert_j "unattended: 信号が無ければ fallback のまま" '.gate' "fallback"
 assert_j "unattended: fallback は印も立たない" '.unattended' "false"
-assert_j "unattended: 信号が無ければ材料軸の質問を維持" '[.open[].reason] | tojson' '["mechanical","high_stakes","regression"]'
+assert_j "unattended: 信号が無ければ質問ゼロ" '.open | tojson' '[]'
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --human-facts '{"mechanical":false}'
 assert_j "unattended: 一部回答済みでも信号が無ければ fallback" '.gate' "fallback"
 run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended \
   --human-facts '{"mechanical":false,"high_stakes":false,"regression":1}'
-assert_j "unattended: 3 軸回答済みなら通常の確定で confirmed" '.gate' "confirmed"
+assert_j "unattended: 3 軸回答済みでも fallback" '.gate' "fallback"
 assert_j "unattended: 回答による確定には印を立てない" '.unattended' "false"
 run env ASTRA_WEEKLY_COUNT_CAP=0 "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --human-facts '{"tier":"astra"}'
 assert_j "unattended: 信号なしの明示 Astra 指定でも承認を省略しない" '.gate' "fallback"
+run "$BIN" --instruction "$INSTR" --kind 実装 --allow-unattended --signals "$(sig '.behavior_defined = 0.4 | .decisions = [{id:"ui_choice",kind:"spec",question:"表示は?",options:[{label:"A",tradeoff:"速い"},{label:"B",tradeoff:"詳しい"}],recommended:"A"}]')"
+assert_j "unattended: decision の ask は残る" '.gate' "ask_human"
+assert_j "unattended: ask で印を立てない" '.unattended' "false"
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.difficulty.confidence = 0.5')"
 assert_j "unattended: 指定しなくても difficulty のみなら confirmed" '.gate' "confirmed"
 
@@ -736,8 +825,8 @@ SC='{"judge":"claude-agent:sonnet",
  "scope_defined":0.95,"behavior_defined":0.82,"done_defined":0.9,"product_decision":0.2}'
 run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(printf '%s' "$SC" | jq -c .)"
 assert_exit "回帰: round1 は判定できる" 0
-assert_j "回帰: round1 の open は ambiguity/high_stakes のみ" '[.open[].reason] | join(",")' "ambiguity,high_stakes"
-assert_j "回帰: round1 の difficulty は自動採用" '.auto_decided | tojson' '["difficulty"]'
+assert_j "回帰: round1 は ambiguity の gather のみ" '[.open[].reason] | join(",")' "ambiguity"
+assert_j "回帰: round1 の high_stakes と difficulty は自動採用" '.auto_decided | tojson' '["high_stakes","difficulty"]'
 assert_j "回帰: round1 は regression を聞かない(score=1.3)" '[.open[] | select(.reason=="regression")] | length' "0"
 assert_j "回帰: round1 は推奨 sol と一致" '.tier_disagreement' "null"
 assert_j "回帰: round1 の推奨" '.recommend.model + "/" + .recommend.effort' "gpt-5.6-sol/high"
@@ -745,8 +834,9 @@ RID_SC="$(jget '.route_id')"
 
 run "$BIN" --route-id "$RID_SC" --human-facts '{"high_stakes":true,"ambiguity":1,"difficulty":3}'
 assert_j "回帰: round2 の推奨は astra/max" '.recommend.model + "/" + .recommend.effort' "gpt-6-astra/max"
-assert_j "回帰: round2 の open は splittable と astra_approval" '[.open[].reason] | join(",")' "splittable,astra_approval"
-assert_j "回帰: round2 は ask_human" '.gate' "ask_human"
+assert_j "回帰: round2 の open は空" '.open | tojson' '[]'
+assert_j "回帰: round2 は予算内 Astra で confirmed" '.gate' "confirmed"
+assert_j "回帰: round2 の splittable は自動採用" '.auto_decided | tojson' '["splittable"]'
 assert_j "回帰: round2 の不一致を記録" '.tier_disagreement.formula' "astra"
 
 run "$BIN" --route-id "$RID_SC" --human-facts '{"astra_approved":false,"splittable":true}'
@@ -883,7 +973,7 @@ assert_j "unavailable: 承認拒否後の Sol を検査" '.gate' "confirmed"
 run env DELEGATE_MODELS_FILE="$UNAVAILABLE_LEDGER" "$BIN" --instruction "$INSTR" --kind 調査 --signals "$ASTRA_SIG"
 assert_j "unavailable: kind の Astra 禁止後の Sol を検査" '.gate' "confirmed"
 run env DELEGATE_MODELS_FILE="$UNAVAILABLE_LEDGER" ASTRA_WEEKLY_COUNT_CAP=0 "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
-assert_j "unavailable: 予算超過後の Sol を検査" '.gate' "ask_human"
+assert_j "unavailable: 予算超過後の Sol を検査" '.gate' "confirmed"
 assert_j "unavailable: 予算超過後の推奨は Sol" '.recommend.model' "gpt-5.6-sol"
 
 # ── gather の質問・選択肢・3 ラウンド目での収束 ──
@@ -895,23 +985,51 @@ for AX in scope_defined done_defined; do
   assert_j "gather $AX: 選択肢は再判定だけ" '.open[0].options | tojson' '["指示書に追記して再判定する"]'
   assert_j "gather $AX: 初回は must_decide=false" '.open[0].must_decide' "false"
   case "$AX" in
-    scope_defined) EXPECT_QUESTION='変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。リポジトリと `git status` から対象・除外範囲を補って指示書に書き、判定し直してください。'
-      EXPECT_ASK='変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。対象と除外範囲を確定してください。' ;;
-    done_defined) EXPECT_QUESTION='完了条件と検証コマンド(ベースライン込み)が指示書にありません。ベースラインを計測して指示書に書き、判定し直してください。'
-      EXPECT_ASK='完了条件と検証コマンド(ベースライン込み)が指示書にありません。確定してください。' ;;
+    scope_defined) EXPECT_QUESTION='変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。リポジトリと `git status` から対象・除外範囲を補って指示書に書き、判定し直してください。' ;;
+    done_defined) EXPECT_QUESTION='完了条件と検証コマンド(ベースライン込み)が指示書にありません。ベースラインを計測して指示書に書き、判定し直してください。' ;;
   esac
   assert_j "gather $AX: 司令塔向けの質問文" '.open[0].question' "$EXPECT_QUESTION"
   run "$BIN" --route-id "$RID_GATHER"
   assert_j "gather $AX: 2 回目も gather_context" '.gate' "gather_context"
   run "$BIN" --route-id "$RID_GATHER"
   assert_j "gather $AX: 3 回目は must_decide=true" '.open[0].must_decide' "true"
-  assert_j "gather $AX: 3 回目は resolution=ask" '.open[0].resolution' "ask"
-  assert_j "gather $AX: 3 回目は ask_human" '.gate' "ask_human"
-  assert_j "gather $AX: 人間向けの質問文に戻る" '.open[0].question' "$EXPECT_ASK"
-  assert_j "gather $AX: 人間向けの選択肢に戻る" '.open[0].options | tojson' '["指示書に追記して再判定する","司令塔の判断に任せる"]'
+  assert_j "gather $AX: 3 回目も resolution=gather" '.open[0].resolution' "gather"
+  assert_j "gather $AX: 3 回目も gather_context" '.gate' "gather_context"
+  assert_j "gather $AX: 選択肢は再判定だけ" '.open[0].options | tojson' '["指示書に追記して再判定する"]'
+  assert_gather_fact_closes "$AX" "true" "$RID_GATHER"
+done
+for AX in behavior_defined product_decision ambiguity; do
+  case "$AX" in
+    behavior_defined) EXPR='.behavior_defined = 0.5'; EXPECTED_FACT=true ;;
+    product_decision) EXPR='.product_decision = 0.5'; EXPECTED_FACT=false ;;
+    ambiguity) EXPR='.ambiguity.score = 2'; EXPECTED_FACT=0 ;;
+  esac
+  run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig "$EXPR")"
+  RID_GATHER="$(jget '.route_id')"
+  assert_j "gather $AX: decisions 空なら gather_context" '.gate' "gather_context"
+  run "$BIN" --route-id "$RID_GATHER"
+  run "$BIN" --route-id "$RID_GATHER"
+  assert_j "gather $AX: 3 ラウンド目は must_decide" '.open[0].must_decide' "true"
+  assert_j "gather $AX: 3 ラウンド目も gather" '.open[0].resolution' "gather"
+  assert_gather_fact_closes "$AX" "$EXPECTED_FACT" "$RID_GATHER"
 done
 runE "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.scope_defined = 0.5')"
 assert_contains "gather: stderr に resolution を含める" '[content/scope_defined/gather]'
+
+# 旧 route-decisions 行の model / astra_approval 理由を streak で安全に読む。
+run "$BIN" --instruction "$INSTR" --kind 実装 --signals "$(sig '.scope_defined = 0.5')"
+LEGACY_BASE="$OUT"
+LEGACY_DIR="$TMP/legacy"; mkdir -p "$LEGACY_DIR"
+printf '%s\n' "$LEGACY_BASE" | jq -c '.route_id = "rt_legacy_mix" | .round = 1 | .open = [{reason:"high_stakes"},{reason:"astra_approval"},{reason:"scope_defined"}] | del(.astra_approval_source)' > "$LEGACY_DIR/route-decisions.jsonl"
+printf '%s\n' "$LEGACY_BASE" | jq -c '.route_id = "rt_legacy_mix" | .round = 2 | .open = [{reason:"high_stakes"},{reason:"astra_approval"},{reason:"scope_defined"}] | del(.astra_approval_source)' >> "$LEGACY_DIR/route-decisions.jsonl"
+run env DELEGATE_LOG_DIR="$LEGACY_DIR" "$BIN" --show rt_legacy_mix
+assert_exit "旧ログ: --show が旧形式行を返す" 0
+assert_j "旧ログ: --show は最新の旧ラウンド" '.round' "2"
+run env DELEGATE_LOG_DIR="$LEGACY_DIR" "$BIN" --route-id rt_legacy_mix
+assert_exit "旧ログ: 再判定が動く" 0
+assert_j "旧ログ: scope の streak が維持される" '.open[0].must_decide' "true"
+assert_j "旧ログ: model と承認理由は open に戻らない" '[.open[].reason] | tojson' '["scope_defined"]'
+assert_j "旧ログ: gather_context のまま" '.gate' "gather_context"
 
 # ── 昇格元: 全一致行の cause / model と合計失敗回数を検証 ──
 ESC_DIR="$TMP/escalation"; mkdir -p "$ESC_DIR"
@@ -1039,7 +1157,7 @@ OUT="$(jq -s -r '[.[] | select(.route_id == $rid and (.auto_decided | index("dif
 [ "$OUT" = "1" ] && ok || ng "記録: route-decisions.jsonl に difficulty の自動採用を記録する"
 OUT="$(jq -s -r '[.[] | select(.ts == null)] | length' "$DELEGATE_LOG_DIR/route-decisions.jsonl")"
 [ "$OUT" = "0" ] && ok || ng "記録: 全行に ts がある"
-OUT="$(jq -sr '[.[] | select(.policy_version != "0.27.0" or (.ledger_version | type) != "string"
+OUT="$(jq -sr '[.[] | select(.policy_version != "0.28.0" or (.ledger_version | type) != "string"
   or (.alternatives | type) != "array" or (has("unavailable_reason") | not)
   or (has("tier_disagreement") | not)
   or any(.open[]; .resolution != "gather" and .resolution != "ask"))] | length' "$DELEGATE_LOG_DIR/route-decisions.jsonl")"

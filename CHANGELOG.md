@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.29.0] - 2026-09-27
+
+### Changed
+
+- delegate-route(`policy_version` 0.28.0): 人間への質問を、判定者が挙げた「仕様の判断」と「実装方針の分岐」だけにする(ユーザー方針 2026-09-27)。モデル選択の材料(`high_stakes` / `splittable` / `mechanical` / `regression`)は `open[]` に出さず判定者の値をそのまま使い、以前なら質問になっていた軸は `auto_decided` に記録する。`tier_disagreement` は記録のみで質問の条件に使わない
+- delegate-route: 対象範囲 `scope_defined`・完了条件 `done_defined` は常に `resolution:"gather"`(司令塔が補う)。2 ラウンド続けて未確定でも人間へ昇格せず、`must_decide:true` を付けて司令塔が `delegated_to_commander` で確定させる。挙動・製品判断・曖昧さが未確定で判定者が選択肢を挙げていない場合も gather にする(中身の無い「確定してください」は人間に出さない)
+- delegate-route: Astra の承認を人間に聞かない。週予算内なら自動承認(`astra_approval_source:"budget_auto"`)、超過なら自動で Sol / xhigh。signals の無い fallback では自動承認しない。人間が自発的に指定した `astra_approved` は従来どおり優先(`"human"`)。`delegate-run` の Astra 実行検査は変更なし
+- delegate-route: fallback(signals なし)で人間に質問しない。材料の facts が 1 つでもあれば擬似信号で決定式を通し、無ければ terra / 台帳の既定 effort。gate は常に `fallback`
+- delegate-run: Astra 検査で拒否したときの案内文(`ASTRA_HINT`)を自動承認の手順に更新(検査ロジックは変更なし)
+- delegate-route: `--allow-unattended` は互換のため受理するが gate を変えない(残るのは人間の仕様判断か司令塔の補完だけで、どちらも無人では確定させない)
+- templates §4(ティア判定依頼書): 質問 12 `decisions` を追加。影響範囲・ファイル・テスト方法・モデル選択などコードから決まる技術判断は含めず notes に書かせる
+- SKILL「ティア判定と確定ループ」、adapters/codex「Astra の使用条件と週予算」、README / README.ja、lessons の見直し指標を新方針に合わせて更新
+
+### Added
+
+- delegate-route: signals の任意フィールド `decisions[]`(`id` / `kind: spec|approach` / `question` / `options[{label, tradeoff}]` / `recommended`)と検証。未回答の decision があれば(内容軸の値にかかわらず)、各 decision を `open[]` の ask 項目(`reason:"decision"`・`decision_id`・`kind`・推奨が先頭の `options`・`option_details`・`recommended`)として出す。`decisions` の無い旧 signals はそのまま通る
+- delegate-route: `--human-facts` の `decision_answers`(`{"<decision_id>":"<選んだ label>"}`)。回答済みの決めどころは再質問しない
+- テスト: delegate-route-tests 594 → 650 件(モデル軸の自動採用、decisions の ask 化・検証・回答、scope / done の 3 ラウンド目 gather、fallback の無質問、Astra の自動承認と予算超過・人間指定、自動承認 route での delegate-run の Astra 検査、旧形式ログとの混在)
+
 ## [0.28.0] - 2026-09-23
 
 ### Changed

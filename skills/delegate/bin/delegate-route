@@ -1,8 +1,8 @@
 #!/bin/bash
 # delegate-route — 委任前のモデルティア判定ゲート(決定的。LLM も外部 API も呼ばない)
 #
-# 担当する: 推奨ティア・effort の決定 / Astra 週予算の集計と承認ゲート /
-#   指示書の内容確定度チェック / 未確定点の「人間への質問」の生成 / 判定履歴の追記
+# 担当する: 推奨ティア・effort の決定 / Astra 週予算の集計と自動承認 /
+#   指示書の内容確定度チェック / 仕様・方針の選択肢の提示 / 判定履歴の追記
 # 担当しない: タスク性質の判定(signals は外から JSON で受け取る)/ 実際の委任実行
 #
 # 使い方:
@@ -25,7 +25,7 @@ ENV_MODELS_FILE="${DELEGATE_MODELS_FILE:-}"
 [ -f "$SKILL_DIR/.env" ] && { set -a; . "$SKILL_DIR/.env"; set +a; }
 LOG_DIR="${ENV_LOG_DIR:-${DELEGATE_LOG_DIR:-$HOME/.claude/logs/delegate}}"
 MODELS_FILE="${ENV_MODELS_FILE:-${DELEGATE_MODELS_FILE:-$SKILL_DIR/models.json}}"
-ROUTE_POLICY_VERSION="0.27.0"
+ROUTE_POLICY_VERSION="0.28.0"
 DECISIONS="$LOG_DIR/route-decisions.jsonl"
 SERIES_FILE="$LOG_DIR/route-series.json"
 DELEGATION_LOG="$LOG_DIR/delegation-log.jsonl"
@@ -112,6 +112,33 @@ validate_signals() {  # $1=JSON 文字列
       | ((["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision"][] as $k
         | if ($o|has($k)|not) then "\($k): 必須項目が無い" else ($o | num($k; 0; 1)) end),
        sc("difficulty"; 4), sc("regression"; 3), sc("ambiguity"; 3),
+       (if ($o|has("decisions")|not) then empty
+        elif ($o.decisions|type) != "array" then "decisions: 配列が必要"
+        else ($o.decisions as $ds
+          | ($ds | to_entries[] | .key as $i | .value as $d
+             | if ($d|type) != "object" then "decisions[\($i)]: オブジェクトが必要"
+               else
+                 (if ($d.id|type) != "string" or (($d.id|type) == "string" and ($d.id|test("^[a-z0-9_]+$")|not)) then "decisions[\($i)].id: 形式不正" else empty end),
+                 (if (["spec","approach"]|index($d.kind)) == null then "decisions[\($i)].kind: spec|approach が必要" else empty end),
+                 (if ($d.question|type) != "string" or (($d.question|type) == "string" and ($d.question|length) == 0) then "decisions[\($i)].question: 空でない文字列が必要" else empty end),
+                 (if ($d.options|type) != "array" then "decisions[\($i)].options: 配列が必要"
+                  elif ($d.options|length) < 2 then "decisions[\($i)].options: 2 件以上が必要"
+                  else ($d.options | to_entries[] | .key as $j | .value as $opt
+                    | if ($opt|type) != "object" then "decisions[\($i)].options[\($j)]: オブジェクトが必要"
+                      else
+                        (if ($opt.label|type) != "string" or (($opt.label|type) == "string" and ($opt.label|length) == 0) then "decisions[\($i)].options[\($j)].label: 空でない文字列が必要" else empty end),
+                        (if ($opt.tradeoff|type) != "string" then "decisions[\($i)].options[\($j)].tradeoff: 文字列が必要" else empty end)
+                      end),
+                    ([$d.options[] | .label | select(type == "string")] as $labels
+                     | if ($labels|length) != ($labels|unique|length) then "decisions[\($i)].options: label が重複" else empty end)
+                  end),
+                 (if $d.recommended == null then empty
+                  elif ($d.recommended|type) != "string" or ([$d.options[]? | .label] | index($d.recommended)) == null
+                  then "decisions[\($i)].recommended: options の label が必要" else empty end)
+               end),
+             ([$ds[] | .id | select(type == "string")] as $ids
+              | if ($ids|length) != ($ids|unique|length) then "decisions.id: 重複" else empty end))
+        end),
        (if (has("tier")|not) then "tier: 必須項目が無い"
         elif (.tier|type) != "object" then "tier: {choice,confidence} が必要"
         else (((.tier.choice // "") as $c
@@ -126,7 +153,7 @@ validate_signals() {  # $1=JSON 文字列
   fi
 }
 
-FACT_KEYS='mechanical high_stakes splittable scope_defined behavior_defined done_defined product_decision difficulty regression ambiguity tier astra_approved instruction_changed delegated_to_commander series_apply'
+FACT_KEYS='mechanical high_stakes splittable scope_defined behavior_defined done_defined product_decision difficulty regression ambiguity tier astra_approved instruction_changed delegated_to_commander series_apply decision_answers'
 validate_facts() {  # $1=JSON 文字列
   local errs
   errs="$(printf '%s' "$1" | jq -r --arg allowed "$FACT_KEYS" '
@@ -152,7 +179,13 @@ validate_facts() {  # $1=JSON 文字列
             elif (["scope_defined","behavior_defined","done_defined","product_decision","ambiguity",
                    "mechanical","high_stakes","splittable","difficulty","regression","tier"] | index($k)) == null
             then "delegated_to_commander: 許可されない軸: \($k)" else empty end)
-       else empty end)
+       else empty end),
+      (if ($o|has("decision_answers")|not) then empty
+       elif ($o.decision_answers|type) != "object" then "decision_answers: オブジェクトが必要"
+       else ($o.decision_answers | to_entries[]
+         | if (.value|type) != "string" or ((.value|type) == "string" and (.value|length) == 0)
+           then "decision_answers.\(.key): 空でない文字列が必要" else empty end)
+       end)
     end' 2>/dev/null)" || die "--human-facts が JSON として解析できない"
   if [ -n "$errs" ]; then
     echo "$errs" | sed 's/^/delegate-route: ERROR: human_facts 検証: /' >&2
@@ -346,11 +379,11 @@ def abs: if . < 0 then -. else . end;
 
 ["mechanical","high_stakes","splittable","scope_defined","behavior_defined","done_defined","product_decision"] as $nouls
 | (if $signals == null then
-     # 3 軸の回答が揃うまでは静的な暫定推奨を維持する。内容軸は評価しない。
-     (if ($facts | has("mechanical") and has("high_stakes") and has("regression")) then
-        {mechanical: (if $facts.mechanical then 1.0 else 0.0 end),
-         high_stakes: (if $facts.high_stakes then 1.0 else 0.0 end),
-         regression: {score: $facts.regression, confidence: 1.0},
+     # いずれかの材料があれば擬似信号で決定式を通す。内容軸は評価しない。
+     (if ($facts | has("mechanical") or has("high_stakes") or has("regression")) then
+        {mechanical: (if $facts.mechanical == true then 1.0 else 0.0 end),
+         high_stakes: (if $facts.high_stakes == true then 1.0 else 0.0 end),
+         regression: {score: ($facts.regression // 1), confidence: 1.0},
          difficulty: {score: 1.0, confidence: 1.0}, splittable: 0.5}
       else null end)
    else
@@ -396,11 +429,12 @@ def abs: if . < 0 then -. else . end;
 
 # ── Astra 候補の扱い(承認と予算)──
 | (if ($facts|has("astra_approved")) then $facts.astra_approved else null end) as $ap
-| (if ($r2.cand | not) then {r:$r2, ask:false, rules:[]}
-   elif $ap == true then {r:$r2, ask:false, rules:["astra_approved"]}
-   elif $ap == false then {r: ($r2 + {tier:"sol"}), ask:false, rules:["astra_declined"]}
-   elif $budget.over then {r: ($r2 + {tier:"sol"}), ask:true, rules:["astra_budget_over"]}
-   else {r:$r2, ask:true, rules:[]} end) as $k2
+| (if ($r2.cand | not) then {r:$r2, approved:false, source:null, rules:[]}
+   elif $ap == true then {r:$r2, approved:true, source:"human", rules:["astra_approved"]}
+   elif $ap == false then {r: ($r2 + {tier:"sol"}), approved:false, source:"human", rules:["astra_declined"]}
+   elif $budget.over then {r: ($r2 + {tier:"sol"}), approved:false, source:null, rules:["astra_budget_over"]}
+   elif $signals == null then {r: ($r2 + {tier:"sol"}), approved:false, source:null, rules:["astra_fallback"]}
+   else {r:$r2, approved:true, source:"budget_auto", rules:[]} end) as $k2
 
 # ── effort: 最終ティアの既定値を起点に信号で上げ、台帳の許容値に丸める ──
 | $ledger.tiers[$k2.r.tier] as $tier_config
@@ -429,7 +463,7 @@ def abs: if . < 0 then -. else . end;
 
 # ── 人間が答えた軸(= 確定済み。二度と open に出さない)──
 | ([ ($facts | keys_unsorted[] as $k
-       | if (["instruction_changed","series_apply","delegated_to_commander"] | index($k)) == null then $k else empty end),
+       | if (["instruction_changed","series_apply","delegated_to_commander","decision_answers"] | index($k)) == null then $k else empty end),
      (($facts.delegated_to_commander // [])[]) ] | unique) as $confirmed
 
 # ── 未確定軸 ──
@@ -461,67 +495,48 @@ def abs: if . < 0 then -. else . end;
        (if ($s.mechanical <= 0.2 or $s.mechanical >= 0.8) then empty else "mechanical" end),
        (if ($score_axes_relevant and $s.regression.confidence < 0.9
             and ($reg_pivotal or $tier_disagreement != null)) then "regression" else empty end) ]
-   end) as $model_open
-| (if ($signals == null and $htier == null) then ["mechanical","high_stakes","regression"] else [] end) as $fb_open
-| (if $k2.ask then ["astra_approval"] else [] end) as $astra_open
-
-| (if $unavailable then [] else
-     ($content_open + $model_open + $fb_open + $astra_open
-      | map(. as $x | select(($confirmed | index($x)) == null))) end) as $reasons
+   end) as $model_uncertain
+| (["high_stakes","splittable","mechanical","regression","difficulty"]
+   | map(. as $axis
+     | select(($confirmed | index($axis)) == null
+       and (($model_uncertain + $auto_decided) | index($axis)) != null))) as $auto_decided
+| ($content_open | map(. as $axis | select(($confirmed | index($axis)) == null))) as $content_pending
+| ($signals.decisions // []
+   | map(. as $d | select(($facts.decision_answers // {} | has($d.id)) | not))) as $decisions_pending
 
 # ── 収束保証: 同じ軸が直前 2 ラウンド連続で open なら must_decide ──
 | (($prev_opens | length) as $n
    | if $n >= 2 then (($prev_opens[$n-1]) - (($prev_opens[$n-1]) - ($prev_opens[$n-2]))) else [] end) as $streak2
 
-| ($budget.astra_tokens_7d | mtok) as $tok_m
-| ($budget.cap | mtok) as $cap_m
-
-| [ $reasons[] as $reason
-    | (if (["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"] | index($reason)) != null
-       then "content" else "model" end) as $axis
-    | (($streak2 | index($reason)) != null) as $must_decide
-    | (if (($reason == "scope_defined" or $reason == "done_defined") and ($must_decide | not))
-       then "gather" else "ask" end) as $resolution
-    | {axis: $axis, reason: $reason, resolution: $resolution,
-       question:
-         (if ($reason == "scope_defined" and $resolution == "gather") then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。リポジトリと `git status` から対象・除外範囲を補って指示書に書き、判定し直してください。"
-          elif ($reason == "done_defined" and $resolution == "gather") then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。ベースラインを計測して指示書に書き、判定し直してください。"
-          elif $reason == "scope_defined" then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。対象と除外範囲を確定してください。"
-          elif $reason == "behavior_defined" then "変更後のユーザー可視挙動・仕様値が一意に決まっていません。挙動を確定してください。"
-          elif $reason == "done_defined" then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。確定してください。"
-          elif $reason == "product_decision" then "未確認の製品判断が含まれています。判断を確定してください。"
-          elif $reason == "ambiguity" then "指示書に未確定の判断が残っています。解消してください。"
-          elif $reason == "high_stakes" then "この変更は重要・高リスク扱いにしますか?"
-          elif $reason == "splittable" then "レビュー可能な独立単位に分割して複数回で委任できますか?"
-          elif $reason == "mechanical" then "この作業は挙動不変の機械的な作業(move-only・rename・整形)ですか?"
-          elif ($reason == "regression" and $signals == null) then "退行時の被害度を指定してください(0 内部のみ / 1 ユーザー可視 / 2 データ・課金・認証 / 3 不可逆)。"
-          elif $reason == "regression" then "退行時の被害の判定が確信に欠けます(score=\($s.regression.score)・confidence=\($s.regression.confidence))。被害度を指定してください。"
-          else "Astra(gpt-6-astra)を使いますか? 今週 \($budget.astra_count_7d)/\($budget.count_cap) 件・\($tok_m)M/\($cap_m)M を消費しています。"
-          end),
-       options:
-         (if $resolution == "gather" then ["指示書に追記して再判定する"]
-          elif $axis == "content" then ["指示書に追記して再判定する","司令塔の判断に任せる"]
-          elif $reason == "high_stakes" then ["高リスク扱いにする","通常扱いにする"]
-          elif $reason == "splittable" then ["分割する","分割しない"]
-          elif $reason == "mechanical" then ["機械的な作業として扱う","通常の実装として扱う"]
-          elif $reason == "regression" then ["0","1","2","3"]
-          elif $budget.over then ["Sol で代替(推奨)","分割して Terra","超過を承知で Astra を使う"]
-          else ["Astra を使う","Sol で代替","分割して Terra"]
-          end),
-       must_decide: $must_decide}
-  ] as $open
+| (if $unavailable or $signals == null then [] else
+     ([ $decisions_pending[] as $d
+        | (if $d.recommended == null then $d.options
+           else [$d.options[] | select(.label == $d.recommended)]
+                + [$d.options[] | select(.label != $d.recommended)] end) as $options
+        | {axis:"content", reason:"decision", decision_id:$d.id, kind:$d.kind,
+           resolution:"ask", question:$d.question, options:[$options[].label],
+           option_details:[$options[] | {label, tradeoff}],
+           recommended:($d.recommended // null), must_decide:false} ]
+      + [ ["scope_defined","behavior_defined","done_defined","product_decision","ambiguity"][] as $reason
+          | select(($content_pending | index($reason)) != null)
+          | select(($reason == "scope_defined" or $reason == "done_defined") or ($decisions_pending | length) == 0)
+          | (($streak2 | index($reason)) != null) as $must_decide
+          | (if $reason == "product_decision" then "false"
+             elif $reason == "ambiguity" then "0" else "true" end) as $fact_value
+          | (if $reason == "scope_defined" then "変更対象(ファイル・モジュール)と触らない範囲が指示書で特定されていません。リポジトリと `git status` から対象・除外範囲を補って指示書に書き、判定し直してください。"
+             elif $reason == "done_defined" then "完了条件と検証コマンド(ベースライン込み)が指示書にありません。ベースラインを計測して指示書に書き、判定し直してください。"
+             else "\(if $reason == "behavior_defined" then "変更後のユーザー可視挙動・仕様値" elif $reason == "product_decision" then "製品判断" else "指示書の判断" end)が確定していませんが、判定者は人間に聞くべき選択肢を挙げていません。司令塔が決めどころを特定して指示書に書き、判定し直してください。技術判断なら司令塔が決めて指示書に書いてください。" end) as $question
+          | {axis:"content", reason:$reason, resolution:"gather",
+             question:($question + (if $must_decide then "2 ラウンド続けて未確定です。司令塔が値を決め、`--human-facts \u0027{\"\($reason)\":\($fact_value),\"delegated_to_commander\":[\"\($reason)\"]}\u0027` で確定させてください。" else "" end)),
+             options:["指示書に追記して再判定する"], must_decide:$must_decide} ]
+     ) end) as $open
 
 | (if $unavailable then "unavailable"
-   elif ($open | length) == 0 then "confirmed"
    elif $signals == null then "fallback"
-   elif all($open[]; .resolution == "gather") then "gather_context"
-   else "ask_human" end) as $gate0
-| (($gate0 == "ask_human" or $gate0 == "fallback")
-   and $unattended_flag == 1
-   and $rec.tier != "astra"
-   and $signals != null
-   and ([$open[] | select(.axis != "model")] | length) == 0) as $unattended
-| (if $unattended then "confirmed" else $gate0 end) as $gate
+   elif ($open | length) == 0 then "confirmed"
+   elif any($open[]; .resolution == "ask") then "ask_human"
+   else "gather_context" end) as $gate
+| false as $unattended
 
 | {route_id: $route_id, round: $round, kind: $kind, instruction: $instruction,
    policy_version: $policy_version, ledger_version: $ledger.ledger_version,
@@ -538,7 +553,8 @@ def abs: if . < 0 then -. else . end;
    open: $open, auto_decided: $auto_decided,
    confirmed_axes: $confirmed, rules_applied: $rules,
    signals: $signals, human_facts: $facts,
-   astra_candidate: $r2.cand, astra_approved: ($ap == true),
+   astra_candidate: $r2.cand, astra_approved: ($ap == true or $k2.source == "budget_auto"),
+   astra_approval_source: $k2.source,
    features: $features, budget: $budget, ts: $ts}
 ')" || die "判定に失敗した(signals / human_facts を確認する)"
 

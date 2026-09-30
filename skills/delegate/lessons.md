@@ -153,9 +153,9 @@ jq -s 'map(select(.human_facts != null)) | group_by(.route_id) | map(last) |
   group_by(.axis) | map({axis: .[0].axis, n: length, agree: (map(select(.agree))|length)})' "$LOG_DIR/route-decisions.jsonl"
 ```
 
-- 同じ内容軸(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision`)に質問が 3 件以上偏ったら、`templates.md`「1. 実装指示書」の必須項目へ昇格して質問の発生源を断つ
+- 同じ内容軸(`scope_defined` / `behavior_defined` / `done_defined` / `product_decision`)が gather・質問に 3 件以上偏ったら、`templates.md`「1. 実装指示書」の必須項目へ昇格して発生源を断つ。0.29.0 以降の人間への質問は `reason:"decision"`(判定者の `decisions[]`)だけなので、`kind`(spec / approach)別の件数と、人間が推奨以外を選んだ割合も見る(推奨がほぼ採られるなら、その種の決めどころは司令塔の技術判断に寄せられる)
 - 人間回答との一致率が高い軸は確定域の閾値(0.2 / 0.8、confidence 0.9)を緩める根拠、低い軸は判定依頼書(`templates.md`「4.」)の質問文を直す根拠。閾値の変更は「同じ軸で 3 件以上」の規律に従う
-- 難度の自動採用(0.26.1): `auto_decided` に `difficulty` が入った route の件数と、その委任の `cause:"model"` 率を見る(`jq -s '[.[] | select((.auto_decided // []) | index("difficulty"))] | group_by(.route_id) | length' "$LOG_DIR/route-decisions.jsonl"`)。低確信の難度をそのまま使って下位ティアへ落とした害が偏って出たら(同じ組で 3 件以上)、決定式のしきい値か判定依頼書の難度レベルの記述を見直す — 質問へは戻さない(ユーザー方針 2026-09-20: 難度は人間に聞かず自己判断)
+- モデル軸の自動採用(難度は 0.26.1、`high_stakes` / `splittable` / `mechanical` / `regression` は 0.29.0 から): `auto_decided` に入った軸ごとの route 件数と、その委任の `cause:"model"` 率を見る(`jq -s '[.[] | (.auto_decided // [])[]] | group_by(.) | map({axis: .[0], n: length})' "$LOG_DIR/route-decisions.jsonl"`)。低確信の難度をそのまま使って下位ティアへ落とした害が偏って出たら(同じ組で 3 件以上)、決定式のしきい値か判定依頼書の難度レベルの記述を見直す — 質問へは戻さない(ユーザー方針 2026-09-20: 難度は人間に聞かず自己判断。2026-09-27: モデル軸・影響範囲・Astra 承認もすべて人間に聞かない)。Astra の自動承認(`astra_approval_source:"budget_auto"`)の件数と採用率も同じ見直しで見る
 - 効果測定: 質問を経た委任と経ない委任の `cause:"instruction"` 率、推奨どおり下位ティアで走らせた委任の `cause:"model"` 率(基準: Terra medium 10%・high 21%)、`--force-astra` による Astra 強行の件数(`runs.jsonl` の `astra_forced`)
 - **成功した仕事あたりの総費用**(0.27.0。OpenAI / Anthropic の公式選定原則「精度目標を先に、費用はその後」を運用に落とした指標。失敗・破棄に費やした分も含めてモデル×effort ごとに比較する。採用 0 件は計算不能として扱い、難易度・種別の違う委任を混ぜた平均だけで順位を決めない):
 
@@ -168,7 +168,7 @@ jq -s 'map(select(.kind == "実装" and .cli == "codex")) | group_by([.model, .e
   | sort_by(.model, .effort)' "$LOG_DIR/delegation-log.jsonl"
 ```
 
-- **ティアは人間に聞かない(0.27.0、ユーザー方針 2026-09-22)**: 判定者の候補と決定式の推奨が割れても「どちらにしますか」は出さず、材料軸(重要・高リスクか / 被害度 / 分割可否 / 機械的か)のうち未確定のものだけを聞く。割れは `tier_disagreement`(判定者の候補・確信・決定式の推奨・段差)に残るので、見直しでは「割れた route の件数」「割れたまま決定式で走らせた委任の `cause:"model"` 率と `routing_verdict`」「人間が材料軸に答えた結果ティアが動いた件数」を見る。判定者の候補の方が結果的に正しかった組が 3 件以上偏れば、決定式の閾値(その軸)を直す — ティアの質問へは戻さない:
+- **ティアは人間に聞かない(0.27.0、ユーザー方針 2026-09-22)**: 判定者の候補と決定式の推奨が割れても「どちらにしますか」は出さない。0.29.0 からは材料軸(重要・高リスクか / 被害度 / 分割可否 / 機械的か)も聞かず、判定者の値で決める。割れは `tier_disagreement`(判定者の候補・確信・決定式の推奨・段差)に残るので、見直しでは「割れた route の件数」「割れたまま決定式で走らせた委任の `cause:"model"` 率と `routing_verdict`」「司令塔が材料軸を上書きした結果ティアが動いた件数」を見る。判定者の候補の方が結果的に正しかった組が 3 件以上偏れば、決定式の閾値(その軸)を直す — ティアの質問へは戻さない:
 
 ```bash
 jq -s 'map(select(.tier_disagreement != null)) | group_by(.route_id) | map(last) |
