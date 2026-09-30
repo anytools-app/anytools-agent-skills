@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.30.0] - 2026-09-30
+
+### Changed
+
+- models.json(`ledger_version` 2026-09-30.1): GPT-6.1 Sol(`gpt-6.1-sol`、2026-09-29 公開、GPT-6 Sol の後継で API 料金は同額)を追加し、terra(medium / high)と sol(xhigh)ティアのモデルを `gpt-6.1-sol` に切り替える(canary なし)。`gpt-6-sol` は `gpt-6.1-sol` の fallback、`gpt-6-astra` の fallback は `gpt-6.1-sol`。effort の許容範囲と決定式(`policy_version`)は変更なし
+- models.json `claude_agent`: 2026-09-29 の実測(Claude Code 2.1.280)で `sonnet` → `claude-sonnet-5-5`、`opus` → `claude-opus-5-5`、`haiku` → `claude-haiku-4-5-20251001`。不要になった `pin_for_opus_5_5` を削除
+- adapters/codex: モデル表・コマンド例・フォールバック表を GPT-6.1 Sol に更新。models_cache の実測を client 0.159.2 に更新。導入方法を brew cask から npm(`npm i -g @openai/codex@<版>`)に変更
+- SKILL: 「opus は Opus 5 に解決されるので frontmatter で固定する」注記を削除
+
+### Added
+
+- SKILL「モデルが使えないとき(CLI の更新)」: 症状(Codex の 400「not supported when using Codex with a ChatGPT account」など)→ 版とリリースノートを比べる → CLI を更新 → read-only で疎通 → 台帳を更新、の手順と、Codex / Claude Code / Grok / Antigravity の更新コマンドの表。brew uninstall の autoremove で依存ツールが消える注意
+- delegate-route-tests: 本番台帳の GPT-6.1 Sol・fallback・`claude_agent` の解決先と、`delegate-run --dry-run` の effort 検査を固定するテスト
+- lessons: GPT-6.1 Sol への切替と CLI 更新の経緯、Claude のエイリアスが CLI の版と関係なく変わった件、判定ログがエイリアスしか残さないため Sonnet 5 / 5.5 の判定を区別できない件
+
 ## [0.29.0] - 2026-09-27
 
 ### Changed

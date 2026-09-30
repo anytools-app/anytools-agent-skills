@@ -201,6 +201,31 @@ Codex へ実装・調査を委任する前に、「修正内容」と「対応�
 - 禁止する変更:
 ```
 
+## モデルが使えないとき(CLI の更新)
+
+新しいモデルは、CLI が古いと使えないことが多い(GPT-6 Sol は Codex CLI 0.154.0、GPT-6.1 Sol は 0.156.0 で使えず、CLI の更新で解消した)。指定したモデルが次のような症状で失敗したら、別のモデルへ乗り換える前に CLI の版を疑う。
+
+- Codex: 400「The '<model>' model is not supported when using Codex with a ChatGPT account」、警告「Model metadata for `<model>` not found」
+- Grok / Antigravity: `--model` が not recognized / unknown model
+- Claude サブエージェント: 新しいモデルが出たのに、エイリアスの解決先が古いまま
+
+手順:
+
+1. **版を比べる**: 手元の版(`<cli> --version`)と最新版を比べ、リリースノートで対象モデルに対応した版を確かめる。Codex は `gh release list -R openai/codex -L 5` と `gh release view rust-v<版> -R openai/codex`
+2. **更新する**: 更新方法は CLI ごとに違う(下の表)。更新はユーザー環境の変更なので、何をどの版に上げるかを一言伝えてから行う
+3. **疎通を確かめる**: read-only の最小の委任(ファイルを 1 つ読ませて値を返させる)で、exit 0 と実際に読めたことを確認する
+4. **台帳を更新する**: `models.json` の `verified_at` / `status` と、adapter のモデル表・実測の記述を直す(モデルの追加・切替は台帳の更新として plan を立てる)
+
+| CLI | 更新 | 備考 |
+|---|---|---|
+| Codex | `npm i -g @openai/codex@<版>` | 2026-09-30 に brew cask から npm へ移行(cask の更新が遅れて 0.156.1 止まりだったため)。npm の global prefix は `/opt/homebrew`。更新後に `~/.codex/models_cache.json` の `client_version` と一覧を確認する(`adapters/codex.md`) |
+| Claude Code | `claude update`(デスクトップ版はアプリの更新) | エイリアスの解決先は CLI の版と関係なく変わることがある(2.1.280 のまま `sonnet` / `opus` が 5.5 に変わった)。確認は transcript の `.message.model`(`lessons.md`「Claude 側」) |
+| Grok | `grok update` | 一覧は `grok models` |
+| Antigravity | `agy update` | 一覧は `agy models` |
+
+- 更新しても使えなければ、台帳の `fallback` へ切り替える(黙って別モデルに置き換えず、委任ログの `note` に書く)
+- brew で入れた CLI を外すときは、`brew uninstall` の autoremove が依存として入った他のツールまで消すことがある(2026-09-30、codex cask を外したら ripgrep が消えた)。外した後に常用ツールがそろっているか確認する
+
 ## 委任先の limit と cooldown
 
 委任先 CLI が limit・クォータ切れで使えないと分かったら、その事実を cooldown として記録し、回復見込みまで再試行しない(**「使ってみる→失敗→代替」を毎回繰り返さない**):
@@ -233,7 +258,7 @@ tail -30 "$LOG_DIR/delegation-log.jsonl" | jq -r 'select(.kind == "レビュー"
 
 - **例外(品質優先)**: 認証・権限・課金・DB移行・セキュリティなど高リスクの独立レビューは、司令塔(Claude)と同系になる Claude サブエージェントを避け、異系統(Antigravity / Grok)を優先する — 同系レビューは司令塔の思い込みを再生産しやすい
 - **偏りの是正**: 1系統が不安定(agy の environment 失敗)や事故(claude-agent のインジェクション事案、`lessons.md`)で敬遠されると、残る1系統(実測では grok)に偏る。偏ったら、cooldown・不安定が解消し次第、意識的に使っていない系統へ戻して均等性を回復する(254件時点で grok 20 / agy 8 / claude-agent 7 の偏りを実測。agy は環境調査の結着待ち、次のレビューは claude-agent か回復後の agy へ)
-- Claude サブエージェントでレビューする場合: Agent ツールの読み取り専用サブエージェントに「独立レビュー依頼書」の内容**だけ**を渡す(サブエージェントには会話コンテキストが渡らないため、ブラインドは自然に成立する)。model は `sonnet` を基本、複雑な変更は `opus`(エイリアスの解決先は `models.json` の `claude_agent` に実測値を記録。2026-09-23 時点で `opus` は Claude Opus 5 に解決され、Claude Opus 5.5 を使うには Agent ツールではなくサブエージェント定義の frontmatter `model: claude-opus-5-5` か `ANTHROPIC_DEFAULT_OPUS_MODEL` が要る)。委任ログには `cli:"claude-agent"`・`kind:"レビュー"` で記録する
+- Claude サブエージェントでレビューする場合: Agent ツールの読み取り専用サブエージェントに「独立レビュー依頼書」の内容**だけ**を渡す(サブエージェントには会話コンテキストが渡らないため、ブラインドは自然に成立する)。model は `sonnet` を基本、複雑な変更は `opus`(エイリアスの解決先は `models.json` の `claude_agent` に実測値を記録。2026-09-29 の実測で `sonnet` → Claude Sonnet 5.5、`opus` → Claude Opus 5.5)。委任ログには `cli:"claude-agent"`・`kind:"レビュー"` で記録する
 
 先に渡すもの:
 
@@ -316,7 +341,7 @@ jq -cn \
 - `outcome` は成果物の最終処遇、`validation` は**委任成果物をレビューした時点**の検証結果(ベースラインに既存失敗がある場合、新規失敗ゼロなら `no_new_failures`)。Claude Code の軽微修正後に結果が変わった場合は最終結果を入れつつ、`note` に「軽微修正後pass」等と明記する(委任先が一発で通したように見せない)
 - `未完了` は**ユーザー都合・仕様変更・作業中断など、委任先や環境の失敗ではない理由**に限る。CLIエラー・認証エラー・timeout・権限詰まりは `失敗`(+ `validation:"not_run"`、`cause` に `tooling|environment|unknown` 等)
 - **手戻りの起因は `cause` で構造化する**(値と処置は「修正・再委任の上限」の表)。**手戻りがなかった委任(修正指示なし、または独立レビュー反映など正常工程の resume のみ)は `cause:"none"`**。`unknown` は「手戻りがあったが原因を特定できていない」専用で、`none` の代用にしない。空文字も不可(集計を壊す。131件見直しで空文字9件・手戻りなしの `unknown` 流用多数が実発生)。resume が多くても `cause` が `instruction` や `spec_change` ならモデル評価に使わない。`routing_verdict:"過小"` の根拠にできるのは `cause:"model"`(指示の誤解・雑な実装・虚偽の完了報告)だけ。**独立レビューの指摘を反映するための resume は正常工程であり、それ自体は cause に数えない**(指摘の根因が指示書の誤り・欠落である場合のみ `instruction`。76件見直しでレビュー反映 resume が `instruction` に混ざり指示書品質のシグナルが濁った実例あり)
-- **`model` は単一の enum 値**(`delegate-run --lint-log` は model を検査しないので規約で守る)。resume で上位ティアへ昇格した場合(例: terra 初回 → astra 修正)は、**採用された最終成果物を出したモデル**を `model` に記録し、昇格の経緯は `note` に書く。`gpt-6-sol→gpt-6-astra` のような複合値は使わない(`group_by(.model)` の集計を壊す)
+- **`model` は単一の enum 値**(`delegate-run --lint-log` は model を検査しないので規約で守る)。resume で上位ティアへ昇格した場合(例: terra 初回 → astra 修正)は、**採用された最終成果物を出したモデル**を `model` に記録し、昇格の経緯は `note` に書く。`gpt-6.1-sol→gpt-6-astra` のような複合値は使わない(`group_by(.model)` の集計を壊す)
 - **`tokens` は委任1件の総トークン数、`cost_usd` は費用(USD)**(resume 分も含む)。codex / grok は delegate-run のサマリに出る値を転記する — このサマリ値は**セッション累計**なので、1委任=1セッションならそのまま転記でよいが、**同一セッションの resume で複数の委任を順に記録する場合は、前エントリ記録時点からの増分だけ**を記録する(累計を各エントリへそのまま転記すると集計が二重計上になる。412件見直しで実測: 共有セッション4エントリの累計転記で実際31.1Mのところ85.6Mを計上)。claude-agent は Agent ツール実行後の usage 表示から tokens を転記し、`delegate-run --estimate-cost claude-agent <tokens>` で cost_usd へ換算する。**単価は `.env` の `COST_PER_MTOK_*` が正**: grok は API 従量の実単価(未設定時 2.00)、サブスク・定額勢(codex / agy / claude-agent)は「**月額 USD ÷ 月間総トークン(百万)**」の按分単価 — 契約・使用量に依存する社内情報なので `.env` にだけ書き、リポジトリに載せない。費用は `cost_usd`、クォータ・レート制限の物理量は `tokens` の二軸で見る(`lessons.md`「ログの見直しと昇格条件」)
 - **`rework_of` は「司令塔が採用した成果物に、後から人間が NG(修正指示・差し戻し)を出したことで発生した委任」にだけ付ける**(値は元委任の run_id か task 要約。それ以外は空にして null を記録する)。司令塔起点のフォローアップ・独立レビュー反映・新規機能の続きには付けない。完了前に人間 NG を同一セッションへの resume で処理した場合も付ける(エントリが分かれないため)。`cause` が委任先起因の手戻りを測るのに対し、`rework_of` は**司令塔レビューの見逃し**(rework_of 付き件数 ÷ 採用件数)を測る別軸 — 集計は `lessons.md`「ログの見直しと昇格条件」。付け忘れは `delegate-run --audit-rework` が検出する(警告のみ・自動修正しない。resumes は runs.jsonl の resume 連鎖と突き合わせ、rework_of は差し戻し語・指摘リスト痕跡・失敗再試行ペアのヒューリスティック。判定と訂正は司令塔)
 - **`commander` は記録時の司令塔の実モデルID**。上のテンプレートどおり **`delegate-run --current-commander` で自動取得する(手入力しない)** — このコマンドは `CLAUDE_CODE_SESSION_ID` からセッション transcript を引き、直近の main-loop(非 sidechain) assistant ターンの `.message.model` を返す。**システムプロンプトの model ID は使わない**: セッション開始時に固定され `/model` 切替に追随しないため、opus に切り替えても `claude-fable-5` と誤記録する。**さらに恒久対策として、`delegate-run` は委任実行のたびに実モデルを `runs.jsonl` の `commander` に自動記録する**(手入力テンプレートに依存しない権威ある記録)。**既に走っているセッションは古い記入テンプレートをコンテキストに保持している**ため、この SKILL.md 更新後も再読込するまで誤値を書きうる — だから記録側の自動化(runs.jsonl)と、突き合わせ監査を用意する: **`delegate-run --audit-commander [--fix]` が委任ログの `commander` を runs.jsonl/transcript の実モデルと run_id 単位で照合し、不一致を検出・訂正する**(ログ見直しのたびに実行する。2026-07-19 に 254→257 件で 31 件の誤記録=opus 稼働中の fable 等を決定論的に訂正した実績)。解決不能時は `unknown`。司令塔スコアカード(`lessons.md`)を司令塔モデル別に比較するための識別子で、`"best"` エイリアスの解決先が変わった時や `/model` 切替時に推移の断絶を検出できる。導入(2026-07-17、203件)以前の過去分は null のまま遡及しない(`--audit-commander` も導入日より前は触らない)
