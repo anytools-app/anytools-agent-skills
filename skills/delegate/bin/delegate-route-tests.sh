@@ -6,7 +6,7 @@ BIN="$(cd "$(dirname "$0")" && pwd)/delegate-route"
 PROD_MODELS_FILE="$(dirname "$BIN")/../models.json"
 # 本番台帳を更新するときは、同じコミットでこの期待値も更新する。
 PROD_TIER_LUNA="gpt-6-luna"
-PROD_TIER_TERRA="gpt-6.1-sol"
+PROD_TIER_TERRA="gpt-6.1-terra"
 PROD_TIER_SOL="gpt-6.1-sol"
 PROD_TIER_ASTRA="gpt-6-astra"
 PASS=0; FAIL=0
@@ -79,6 +79,12 @@ assert_j "本番台帳: sol のモデル ID" '.tiers.sol.model' "$PROD_TIER_SOL"
 assert_j "本番台帳: astra のモデル ID" '.tiers.astra.model' "$PROD_TIER_ASTRA"
 assert_j "本番台帳: GPT-6.1 Sol は利用可能" '.models["gpt-6.1-sol"].status' "available"
 assert_j "本番台帳: GPT-6.1 Sol の fallback" '.models["gpt-6.1-sol"].fallback' "gpt-6-sol"
+assert_j "本番台帳: GPT-6.1 Terra は利用可能" '.models["gpt-6.1-terra"].status' "available"
+assert_j "本番台帳: GPT-6.1 Terra の fallback" '.models["gpt-6.1-terra"].fallback' "$PROD_TIER_SOL"
+assert_j "本番台帳: GPT-5.5 は台帳に無い" '.models | has("gpt-5.5")' "false"
+assert_j "本番台帳: GPT-5.6 系の fallback は null" \
+  '[.models["gpt-5.6-sol"].fallback, .models["gpt-5.6-terra"].fallback, .models["gpt-5.6-luna"].fallback] | all(. == null)' "true"
+assert_j "本番台帳: sol の efforts_allowed" '.tiers.sol.efforts_allowed | tojson' '["high","xhigh"]'
 assert_j "本番台帳: Astra の fallback" '.models["gpt-6-astra"].fallback' "$PROD_TIER_SOL"
 assert_j "本番台帳: judge の解決先" '.claude_agent.roles.judge.resolved' "claude-sonnet-5-5"
 assert_j "本番台帳: review の解決先" '.claude_agent.roles.review.resolved' "claude-opus-5-5"
@@ -92,9 +98,13 @@ assert_j "本番台帳: fallback は null または models に存在する" \
 PROD_RUN_DIR="$TMP/prod-ledger-repo"; mkdir -p "$PROD_RUN_DIR"; git -C "$PROD_RUN_DIR" init -q
 runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --force-astra --cli codex --mode write --model "$PROD_TIER_ASTRA" --effort high --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
 assert_exit "本番台帳: delegate-run のスキーマ検証を通る" 0
-for EFFORT in xhigh medium; do
+for EFFORT in xhigh high medium; do
   runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --cli codex --mode write --model "$PROD_TIER_SOL" --effort "$EFFORT" --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
   assert_exit "本番台帳: GPT-6.1 Sol/$EFFORT の effort 検査を通る" 0
+done
+for EFFORT in medium high; do
+  runE env DELEGATE_MODELS_FILE="$PROD_MODELS_FILE" "$(dirname "$BIN")/delegate-run" --dry-run --cli codex --mode write --model "$PROD_TIER_TERRA" --effort "$EFFORT" --cd "$PROD_RUN_DIR" --prompt-file "$INSTR"
+  assert_exit "本番台帳: GPT-6.1 Terra/$EFFORT の effort 検査を通る" 0
 done
 
 # ── signals 検証 ───────────────────────────────────────

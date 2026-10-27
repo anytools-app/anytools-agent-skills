@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.31.0] - 2026-10-27
+
+### Changed
+
+- models.json(`ledger_version` 2026-10-27.1): GPT-6.1 Terra(`gpt-6.1-terra`、2026-10-26 公開、API 料金 $1 / $5 で 6.1 Sol の半額)を追加し、terra ティア(medium / high)のモデルを `gpt-6.1-sol` から `gpt-6.1-terra` に切り替える。sol ティア(`gpt-6.1-sol`)の `efforts_allowed` に `high` を足す(既定は `xhigh` のまま)。`gpt-6.1-terra` の fallback は `gpt-6.1-sol`。決定式(`policy_version`)は変更なし
+- models.json: 2026-10-14 に Codex から退役した `gpt-5.5` を削除し、GPT-5.6 系の fallback を `null` にする
+- adapters/codex: モデル表を「luna = 6 Luna / terra = 6.1 Terra / sol = 6.1 Sol / astra = 6 Astra」の 4 段に刷新。迷ったときの既定と read-only 相談の標準を `gpt-6.1-terra / medium` に。models_cache の実測を client 0.163.0 に更新し、フォールバック表に Terra を追加、GPT-5.5 を退役済みにする。Terra の監視期間(〜2026-11-10)と切り戻し方を追記
+- README: コマンド例のモデルを `gpt-6.1-terra` に
+
+### Added
+
+- delegate-route-tests: 本番台帳の GPT-6.1 Terra(status・fallback)、GPT-5.5 が無いこと、GPT-5.6 系の fallback、sol ティアの `efforts_allowed`、`delegate-run --dry-run` で Terra の medium / high と Sol の high が effort 検査を通ることを固定するテスト
+- lessons: GPT-6.1 Terra の追加と terra ティアの切替、models_cache の `client_version` が手元の CLI と一致しないことがある件
+
 ## [0.30.0] - 2026-09-30
 
 ### Changed

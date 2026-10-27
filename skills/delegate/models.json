@@ -1,5 +1,5 @@
 {
-  "ledger_version": "2026-09-30.1",
+  "ledger_version": "2026-10-27.1",
   "models": {
     "gpt-6-astra": {
       "provider": "openai",
@@ -32,6 +32,22 @@
       "verified_at": "2026-09-30",
       "source": "https://learn.chatgpt.com/docs/models",
       "fallback": "gpt-6-sol"
+    },
+    "gpt-6.1-terra": {
+      "provider": "openai",
+      "cli": "codex",
+      "efforts_supported": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "status": "available",
+      "verified_at": "2026-10-27",
+      "source": "https://learn.chatgpt.com/docs/models",
+      "fallback": "gpt-6.1-sol"
     },
     "gpt-6-sol": {
       "provider": "openai",
@@ -78,7 +94,7 @@
       "status": "available",
       "verified_at": "2026-09-23",
       "source": "https://learn.chatgpt.com/docs/models",
-      "fallback": "gpt-5.5"
+      "fallback": null
     },
     "gpt-5.6-terra": {
       "provider": "openai",
@@ -94,7 +110,7 @@
       "status": "available",
       "verified_at": "2026-09-23",
       "source": "https://learn.chatgpt.com/docs/models",
-      "fallback": "gpt-5.5"
+      "fallback": null
     },
     "gpt-5.6-luna": {
       "provider": "openai",
@@ -109,22 +125,7 @@
       "status": "available",
       "verified_at": "2026-09-23",
       "source": "https://learn.chatgpt.com/docs/models",
-      "fallback": "gpt-5.5"
-    },
-    "gpt-5.5": {
-      "provider": "openai",
-      "cli": "codex",
-      "efforts_supported": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "status": "available",
-      "verified_at": "2026-09-23",
-      "source": "https://learn.chatgpt.com/docs/models",
-      "fallback": null,
-      "retirement_at": "2026-10-14"
+      "fallback": null
     }
   },
   "tiers": {
@@ -136,7 +137,7 @@
       "default_effort": "medium"
     },
     "terra": {
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.1-terra",
       "efforts_allowed": [
         "medium",
         "high"
@@ -146,6 +147,7 @@
     "sol": {
       "model": "gpt-6.1-sol",
       "efforts_allowed": [
+        "high",
         "xhigh"
       ],
       "default_effort": "xhigh"
