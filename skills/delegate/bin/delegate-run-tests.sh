@@ -303,8 +303,8 @@ assert_contains "lint: ファイル不存在を案内" "存在しないか空"
 
 mkdir -p "$DELEGATE_LOG_DIR"
 printf '%s\n' \
-  '{"outcome":"採用","cause":"none","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
-  '{"outcome":"一部採用","cause":"instruction","validation":"no_new_failures","kind":"調査","routing_verdict":"過小","delegation_verdict":"必要"}' \
+  '{"date":"2026-07-20","outcome":"採用","cause":"none","validation":"pass","kind":"実装","routing_verdict":"適正","delegation_verdict":"必要"}' \
+  '{"date":"2026-07-20","outcome":"一部採用","cause":"instruction","validation":"no_new_failures","kind":"調査","routing_verdict":"過小","delegation_verdict":"必要"}' \
   > "$DELEGATE_LOG_DIR/delegation-log.jsonl"
 run "$BIN" --lint-log
 assert_exit "lint: 正常 enum は成功" 0
@@ -695,6 +695,128 @@ BEFORE_N="$(ls "$DELEGATE_LOG_DIR/instructions" 2>/dev/null | grep -c . | tr -d 
 run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
 AFTER_N="$(ls "$DELEGATE_LOG_DIR/instructions" 2>/dev/null | grep -c . | tr -d ' ')"
 [ "$BEFORE_N" = "$AFTER_N" ] && ok || ng "run: dry-run では指示書を退避しない($BEFORE_N → $AFTER_N)"
+
+# ── Astra のレビュー枠(--astra-review): 設計前・本番前の独立レビュー専用。route 不要 ──
+run "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: 正しい組み合わせは route なしで通る" 0
+assert_contains "astra-review: read-only sandbox" "--sandbox read-only"
+assert_contains "astra-review: モデル" "-m gpt-6-astra"
+assert_contains "astra-review: effort" 'model_reasoning_effort=\"high\"'
+assert_not_contains "astra-review: route を求めない" "--route-id が必要"
+assert_not_contains "astra-review: 強行の警告を出さない" "--force-astra で強行"
+run "$BIN" --dry-run --astra-review --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: write は拒否" 2
+assert_contains "astra-review: write の拒否理由" "--mode readonly 専用"
+run "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-6-astra --effort max --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: effort max は拒否" 2
+assert_contains "astra-review: effort の拒否理由" "--effort high 専用"
+run "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-5.6-sol --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: Astra 以外のモデルは拒否" 2
+assert_contains "astra-review: モデルの拒否理由" "--model gpt-6-astra 専用"
+run "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT" --route-id rt_ok
+assert_exit "astra-review: --route-id との併用は拒否" 2
+run "$BIN" --dry-run --astra-review --force-astra --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: --force-astra との併用は拒否" 2
+run env AGY_BIN="$FAKEAGY" "$BIN" --dry-run --astra-review --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "astra-review: codex 以外は拒否" 2
+assert_contains "astra-review: CLI の拒否理由" "codex 専用"
+
+# read-only の --force-astra は止めずに --astra-review を案内する
+run "$BIN" --dry-run --force-astra --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "force-astra readonly: 止めない" 0
+assert_contains "force-astra readonly: --astra-review を案内" "--astra-review を使う"
+run "$BIN" --dry-run --force-astra --cli codex --mode write --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_not_contains "force-astra write: レビュー枠の案内は出さない" "--astra-review を使う"
+
+# レビュー枠の超過は警告だけ(止めない)。実装の週予算には数えない
+RBDIR="$TMP/review-budget"; mkdir -p "$RBDIR"
+printf '{"date":"%s","kind":"レビュー","model":"gpt-6-astra","tokens":150000000}\n' "$(date +%F)" > "$RBDIR/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RBDIR" "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: レビュー枠の超過でも止めない" 0
+assert_contains "astra-review: レビュー枠の超過を警告" "レビュー枠が週の上限を超えている"
+printf '{"date":"%s","kind":"レビュー","model":"gpt-6-astra","tokens":1000}\n' "$(date +%F)" > "$RBDIR/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$RBDIR" "$BIN" --dry-run --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_not_contains "astra-review: 枠内なら警告しない" "レビュー枠が週の上限"
+
+# 実行記録: astra_lane(review / route / forced / null)と、埋めた形の記録コマンド
+run env HOME="$RUNHOME" PATH="$FAKEBIN:$PATH" "$BIN" --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high \
+  --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "astra-review: 実行は成功" 0
+RID4="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+LANE4="$(jq -r --arg r "$RID4" 'select(.run_id==$r) | .astra_lane' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LANE4" = "review" ] && ok || ng "run: --astra-review は astra_lane=review(実際: $LANE4)"
+FORCED4="$(jq -r --arg r "$RID4" 'select(.run_id==$r) | .astra_forced' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$FORCED4" = "false" ] && ok || ng "run: --astra-review は astra_forced=false(実際: $FORCED4)"
+assert_contains "記録コマンド: jq -cn の形で出す" "jq -cn"
+assert_contains "記録コマンド: run_id を埋める" "--arg run_id '$RID4'"
+assert_contains "記録コマンド: レビュー枠は kind=レビュー" "--arg kind 'レビュー'"
+assert_contains "記録コマンド: repo を埋める" "--arg repo 'repo'"
+assert_contains "記録コマンド: model を埋める" "--arg model 'gpt-6-astra'"
+assert_contains "記録コマンド: effort を埋める" "--arg effort 'high'"
+assert_contains "記録コマンド: 判定の値は司令塔が埋める" '--arg outcome "<採用|一部採用|破棄|未完了|失敗>"'
+assert_contains "記録コマンド: 追記先" "delegation-log.jsonl"
+LANE3="$(jq -r --arg r "$RID3" 'select(.run_id==$r) | .astra_lane' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LANE3" = "forced" ] && ok || ng "run: --force-astra は astra_lane=forced(実際: $LANE3)"
+LANE2="$(jq -r --arg r "$RID2" 'select(.run_id==$r) | .astra_lane' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LANE2" = "null" ] && ok || ng "run: Astra 以外は astra_lane=null(実際: $LANE2)"
+LANE_ROUTE="$(jq -Rr 'fromjson? | select(type=="object" and .route_id=="rt_consume") | .astra_lane' "$DELEGATE_LOG_DIR/runs.jsonl" | tail -1)"
+[ "$LANE_ROUTE" = "route" ] && ok || ng "run: 承認済み route は astra_lane=route(実際: $LANE_ROUTE)"
+run env HOME="$RUNHOME" PATH="$FAKEBIN:$PATH" "$BIN" --cli codex --mode write --model gpt-5.6-terra --effort medium \
+  --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_contains "記録コマンド: レビュー枠以外は kind を司令塔が選ぶ" '--arg kind '"'"'<実装|相談|レビュー|調査>'"'"
+
+# ── 司令塔モデル: <synthetic>(API エラー・中断の合成メッセージ)は実モデルとして返さない ──
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-4-8"}}' '{"type":"assistant","message":{"model":"<synthetic>"}}' > "$CHOME/.claude/projects/testproj/sess-syn.jsonl"
+run env HOME="$CHOME" CLAUDE_CODE_SESSION_ID=sess-syn "$BIN" --current-commander
+assert_contains "current-commander: <synthetic> の前の実モデルを返す" "claude-opus-4-8"
+assert_not_contains "current-commander: <synthetic> は返さない" "synthetic"
+printf '%s\n' '{"type":"assistant","message":{"model":"<synthetic>"}}' > "$CHOME/.claude/projects/testproj/sess-synonly.jsonl"
+run env HOME="$CHOME" CLAUDE_CODE_SESSION_ID=sess-synonly "$BIN" --current-commander
+assert_contains "current-commander: <synthetic> しかなければ unknown" "unknown"
+
+# commander 監査: runs.jsonl の <synthetic> を正とせず transcript で解決する(Linux の /claude-1000/ も読む)
+SHOME="$TMP/shome"; SLOG="$TMP/slogs"; mkdir -p "$SLOG" "$SHOME/.claude/projects/p"
+SSID="11111111-2222-7333-8444-555555555555"
+printf '%s\n' \
+  '{"type":"assistant","timestamp":"2026-10-24T01:00:00Z","message":{"model":"claude-fable-5-1"}}' \
+  '{"type":"assistant","timestamp":"2026-10-24T01:10:00Z","message":{"model":"<synthetic>"}}' \
+  > "$SHOME/.claude/projects/p/$SSID.jsonl"
+printf '%s\n' \
+  "{\"run_id\":\"run_S1\",\"ts\":\"2026-10-24T01:20:00Z\",\"commander\":\"<synthetic>\",\"prompt_file\":\"/tmp/claude-1000/proj/$SSID/scratchpad/req.md\"}" \
+  "{\"run_id\":\"run_S2\",\"ts\":\"2026-10-24T01:20:00Z\",\"prompt_file\":\"/tmp/claude-1000/proj/$SSID/scratchpad/req2.md\"}" \
+  > "$SLOG/runs.jsonl"
+printf '%s\n' \
+  '{"date":"2026-10-24","run_id":"run_S1","commander":"claude-fable-5-1","kind":"レビュー"}' \
+  '{"date":"2026-10-24","run_id":"run_S2","commander":"claude-opus-5-5","kind":"レビュー"}' \
+  > "$SLOG/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$SLOG" HOME="$SHOME" "$BIN" --audit-commander --fix
+assert_not_contains "audit-commander: runs.jsonl の <synthetic> で上書きしない" "run_S1"
+assert_contains "audit-commander: /claude-1000/ のパスから司令塔を解決して誤記録を検出" "run_S2"
+S1="$(jq -r 'select(.run_id=="run_S1") | .commander' "$SLOG/delegation-log.jsonl")"
+[ "$S1" = "claude-fable-5-1" ] && ok || ng "audit-commander --fix: run_S1 は fable のまま(実際: $S1)"
+S2="$(jq -r 'select(.run_id=="run_S2") | .commander' "$SLOG/delegation-log.jsonl")"
+[ "$S2" = "claude-fable-5-1" ] && ok || ng "audit-commander --fix: run_S2 は transcript の fable に訂正(実際: $S2)"
+
+# ── 委任ログ lint: date・review_findings の形と、規約外のキー ──
+L2DIR="$TMP/lint2"; mkdir -p "$L2DIR"
+LBASE='"kind":"レビュー","outcome":"採用","validation":"not_run","delegation_verdict":"必要","routing_verdict":"適正","cause":"none"'
+printf '%s\n' \
+  "{\"date\":\"2026-10-24\",$LBASE,\"review_findings\":3}" \
+  "{$LBASE,\"review_findings\":null}" \
+  "{\"date\":\"2026/10/24\",$LBASE}" \
+  "{\"date\":\"2026-10-24\",$LBASE,\"review_findings\":{\"high\":1,\"medium\":2}}" \
+  > "$L2DIR/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$L2DIR" "$BIN" --lint-log
+assert_exit "lint: date・review_findings の逸脱は exit 1" 1
+assert_not_contains "lint: 正しい行は指摘しない" "line 1:"
+assert_contains "lint: date 欠落" 'line 2: date="(missing)"'
+assert_contains "lint: date の形式違い" 'line 3: date="2026/10/24"'
+assert_contains "lint: review_findings の object" 'line 4: review_findings={"high":1,"medium":2}'
+printf '%s\n' "{\"date\":\"2026-10-24\",$LBASE,\"result\":\"high0\",\"verdict\":\"useful\"}" > "$L2DIR/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$L2DIR" "$BIN" --lint-log
+assert_exit "lint: 規約外のキーは警告だけ(exit 0)" 0
+assert_contains "lint: 規約外のキーを列挙" "規約外のキー: result, verdict"
+assert_contains "lint: 警告の件数" "警告 1件"
 
 echo
 echo "PASS: $PASS / FAIL: $FAIL"

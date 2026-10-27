@@ -54,6 +54,14 @@
 - **delegate-run 自身を変更する委任は、作業ツリーの delegate-run で走らせない(2026-09-19 実測)**: `~/.claude/skills/delegate` はこのリポジトリへの symlink なので、委任先が `bin/delegate-run` を書き換えると、走行中のラッパー(bash はスクリプトを逐次読みする)が途中から別の内容を読み、委任完了後に構文エラーで落ちた。codex 本体の作業は無事だったが、後処理(runs.jsonl の記録・トークン抽出・指示書の退避)が丸ごと欠落 → このスキルの `bin/` を変更対象に含む委任では、`git show HEAD:skills/delegate/bin/delegate-run > <scratchpad>/delegate-run-stable` のコピーをラッパーに使う(`.env` を読めないので `DELEGATE_LOG_DIR` 等は環境変数で渡す)。欠落した run は codex のログから session_id を拾い、`--extract-tokens` で補完して委任ログに記録する
 - **指示書の保全が未実装だった**: 0.24.0 で計画した `$LOG_DIR/instructions/<run_id>.md` への退避が入っておらず、現存 1 件。過去ログでのバックテストができなかった → 0.26.0 で `delegate-run` に実装
 
+### 2026-10 / 委任ログ見直し(1,431 件、v0.32.0)— Astra のレビュー強行とログの独自形式
+
+- **ゲートと実運用の用途がずれると、強行フラグが日常になってゲートが消える(2026-09-22〜10-27 実測)**: runs.jsonl で Astra 1,144 回のうち 1,131 回が `--force-astra`(read-only 1,041 回)。200stack-app の「設計前・本番前のレビューは Astra」(ユーザー指示 2026-10-12)をスキルが知らず、週予算もレビューを実装と同じ枠で数えていたので、直近 7 日は 1.67 億トークン・147 件で予算(8,000 万・8 件)を常に超過し、実装の Astra は自動で Sol に落ち続けた → 用途ごとの正式な口(`--astra-review`)と別枠の予算を作り、`--force-astra` を人間が指名した例外に戻した(`adapters/codex.md`「レビュー枠」)。Astra のレビューは 1 件あたりの指摘数が平均 5.5 件で、Sol のレビュー(2.0 件)より多く見つけていた — 使うこと自体は妥当
+- **合成メッセージ `<synthetic>` を司令塔モデルとして記録していた(2026-10-24 実測 5 件)**: API エラー・中断で transcript に `"model":"<synthetic>"` の assistant 行が入る。`resolve_commander` がそれを拾って runs.jsonl に記録し、`--audit-commander --fix` が runs.jsonl を正として委任ログの正しい値(fable)を上書きした → `<` で始まるモデル名を飛ばし、記録済みの `<synthetic>` は正としない。同じ関数で、prompt_file から司令塔の session_id を取る正規表現が macOS の `/claude-501/` 決め打ちで、Linux(`/claude-1000/`)では常に解決できなかったのも直した
+- **レビューの記録は独自の形式になりやすい**: 本番前の Astra レビュー 40 行が `{ts, run_id, cli, model, task, result, verdict}` で書かれ、date・kind・outcome が欠けた(予算の集計では「日付が不正」として窓内に数えられた)。ほかに `kind:"独立レビュー"` 19 件、`review_findings` を `{high, medium, low}` の object にした 19 件 → `delegate-run` が実行後に値を埋めた `jq -cn` を出し、`--lint-log` に date の形式・`review_findings` の型・規約外のキーの検査を足した。既存の行は runs.jsonl から補完して直した(バックアップ `*.bak-20261027`)
+- **自己採点は相変わらず使い過ぎを検出しない**: `routing_verdict` は 1,380 件が「適正」・「過剰」は 9 件(0.6%)。一方で実装 482 件の 54% が Sol/xhigh で、トークンの約 73% を使い、`cause:"model"` 率は xhigh 16.6%・high 4.2%(xhigh には難しい仕事を当てているので単純比較はできない)。ティアを決める式は判定役と分かれた 240 件のほとんどで格上げしていた(terra→sol 124・terra→astra 69・sol→astra 33)。0.31.0 の Terra の監視期間(〜11-10)の結果と合わせて見直す
+- **resume を 3 回以上重ねた委任が 139 件**(規約のやり直し上限超え)。司令塔スコアカード(2026-10-27)は Opus 5.5 が指示書の手戻り率 16.4%・差し戻し率 0.5%、Fable 5.1 が 14.6%・0%
+
 ## Grok
 
 - 403「Your newly created team doesn't have any credits」= xAI 側のクレジット未購入。作業を止めて console.x.ai での購入をユーザーに案内する(2026-07-11 クレジット購入後に read-only スモークで疎通確認済み: exit 0・2秒・sessionId 取得。同日実測でモデルラインナップが grok-4.20/4.3/4.5 系へ変わり、`--output-format json` の応答構造も `{text, stopReason, sessionId, requestId}` に変化 — `type` フィールド無し。delegate-run の sessionId 抽出はそのまま動作)

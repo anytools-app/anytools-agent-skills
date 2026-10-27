@@ -42,11 +42,15 @@ effort はモデル切替とは別のレバー(両社の公式方針)。根拠: 
 
 ### Astra の使用条件と週予算(2026-09-19、ユーザー方針)
 
-- **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(GPT-6.1 Sol / xhigh が上限)
+- **使ってよいのは 3 つだけ**: (1) 分割不能な最難関、(2) 重要・高リスク、(3) Terra / Sol が `cause:"model"` で 2 回失敗した後の昇格。調査・相談・レビューには使わない(GPT-6.1 Sol / xhigh が上限)。例外は下の「レビュー枠」だけ
 - **effort は `high` か `max` のみ**。`low` / `medium` の Astra は使わない(その用途は Terra / Sol で足りる。canary 期間に `astra/medium` 37 件で 6.9 億トークンを消費した)
 - **週予算: 直近 7 日で 8,000 万トークンまたは 8 件**(どちらか早い方。`.env` の `ASTRA_WEEKLY_TOKEN_CAP` / `ASTRA_WEEKLY_COUNT_CAP`)。残量は `delegate-route --budget`
 - **承認は週予算で自動判定する(人間に聞かない。ユーザー方針 2026-09-27)**。`delegate-route` が Astra を推奨したとき、週予算内なら自動で承認し(`astra_approval_source:"budget_auto"`)、超過なら自動で `gpt-6.1-sol / xhigh` に切り替える。人間が自発的に使う/使わないと言った場合だけ `astra_approved` を facts に入れる(`"human"`)。fallback(signals なし)では自動承認しない。`delegate-run` は `-m gpt-6-astra` を、承認済み(`astra_approval_source` が `budget_auto` か `human`)の `--route-id` なしでは実行前に拒否する。検査するのは (1) route が `gate:"confirmed"`・推奨 Astra・`astra_approved:true` (2) `--prompt-file` の SHA-256 が承認時の指示書と一致 (3) `--effort` が `high` / `max` で route の推奨と一致 (4) その承認が未使用(同じ指示書内容での成功した新規実行 1 回で消費。失敗した実行は数えない。承認した委任と同じセッションの `--resume` は通る。指示書を直して同じ route で再承認すれば、新しい内容での新規実行は通る。同じ内容をもう一度新規実行するなら route を取り直す)。強行は `--force-astra` のみ(cooldown 用の `--force` では通らない)。強行した実実行は `runs.jsonl` に `astra_forced:true` が残るので(dry-run は記録されない)、委任ログの `note` に理由を書く
 - 予算超過時は自動で `gpt-6.1-sol / xhigh`(sol ティア)。「超過を承知で使う」は人間が明示した場合(`astra_approved:true`)か `--force-astra` だけ
+- **レビュー枠(`--astra-review`、0.32.0)**: 設計を決める前と本番(main)へ出す前の**独立レビュー**は、ユーザー方針で Astra を使う(200stack-app 2026-10-12)。`delegate-run --cli codex --mode readonly --model gpt-6-astra --effort high --astra-review` で実行し、route は取らない。組み合わせは固定で、write・effort 違い・別モデル・`--route-id` / `--force-astra` との併用は拒否する。実行記録は `runs.jsonl` の `astra_lane:"review"`
+  - 予算は実装と別枠: `delegate-route --budget` の `review`(委任ログで `kind:"レビュー"` の Astra 行)。上限は週 1.5 億トークン(`.env` の `ASTRA_REVIEW_WEEKLY_TOKEN_CAP`。2026-10 の実測は週 0.66〜1.46 億)で、**超過しても止めずに警告だけ出す**。トップレベルの `astra_tokens_7d` / `astra_count_7d` / `over` はレビュー以外(実装・相談・調査)の消費だけを数える — レビューで実装の Astra が Sol に落ちることはない
+  - 設計の下書き・相談・調査に Astra を使うのはレビュー枠ではない。人間が明示的に指名したときだけ `--force-astra` で通し(`astra_lane:"forced"`)、実装の週予算に数える。read-only で `--force-astra` を使うと「レビューなら `--astra-review`」と警告が出る
+  - 導入の経緯: 2026-09-22〜10-27 の Astra 1,144 回のうち 1,131 回が `--force-astra` で、ほとんどが read-only のレビューだった。レビューも実装の週予算に数えていたので予算は常に超過し、強行が日常になってゲートが意味を失っていた
 - 手順は `../SKILL.md`「ティア判定と確定ループ」
 
 ### GPT-6 Astra の max / ultra(例外扱い)

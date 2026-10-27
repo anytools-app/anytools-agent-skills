@@ -100,8 +100,8 @@ skills/delegate/
 ├── models.json       # モデル台帳(ティア→モデル ID・対応 effort・可用性・確認日。判定と effort 検査の正)
 ├── lessons.md        # 事故例・実測記録・ログ見直しの昇格条件
 ├── bin/
-│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown・Astra ゲート)
-│   ├── delegate-route         # モデルティア判定ゲート(決定式・Astra 週予算・人間への質問の生成。LLM は呼ばない)
+│   ├── delegate-run           # 安全なコマンドランナー(sandbox必須化・ログ隔離・実行記録・limit cooldown・Astra ゲートとレビュー枠)
+│   ├── delegate-route         # モデルティア判定ゲート(決定式・Astra 週予算(実装とレビュー枠を別に集計)・人間への質問の生成。LLM は呼ばない)
 │   ├── delegate-route-tests.sh
 │   └── delegate-run-tests.sh  # 既知事故を変換した dry-run テスト
 └── .env.example

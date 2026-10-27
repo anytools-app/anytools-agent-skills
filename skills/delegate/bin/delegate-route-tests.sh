@@ -332,6 +332,42 @@ assert_j "予算: ログが無ければ 0" '.astra_tokens_7d' "0"
 assert_j "予算: 既定 cap" '.cap' "80000000"
 assert_j "予算: 既定 count_cap" '.count_cap' "8"
 
+# ── レビュー枠: kind=レビュー の Astra は実装の週予算と分けて数える ──
+review_rows() {  # $1=件数 $2=1件あたり tokens $3=date $4=kind
+  local i=1
+  while [ "$i" -le "$1" ]; do
+    printf '{"date":"%s","kind":"%s","model":"gpt-6-astra","tokens":%s}\n' "$3" "$4" "$2"
+    i=$((i+1))
+  done
+}
+bud "$(review_rows 120 1000000 2026-09-19 レビュー)"
+assert_j "レビュー枠: レビューだけ多い週でも実装の over は false" '.over' "false"
+assert_j "レビュー枠: 実装の件数に数えない" '.astra_count_7d' "0"
+assert_j "レビュー枠: 実装のトークンに数えない" '.astra_tokens_7d' "0"
+assert_j "レビュー枠: レビューの件数" '.review.count_7d' "120"
+assert_j "レビュー枠: レビューのトークン" '.review.tokens_7d' "120000000"
+assert_j "レビュー枠: 1.2 億は上限未満" '.review.over' "false"
+bud "$(review_rows 1 150000000 2026-09-19 レビュー)"
+assert_j "レビュー枠: 1.5 億で over" '.review.over' "true"
+assert_j "レビュー枠: 実装の over には波及しない" '.over' "false"
+bud "$(review_rows 2 10 2026-09-19 独立レビュー; review_rows 3 20 2026-09-19 実装; astra_rows 1 5 2026-09-19)"
+assert_j "レビュー枠: 旧 kind「独立レビュー」もレビュー枠" '.review.count_7d' "2"
+assert_j "レビュー枠: 実装・kind なしは実装の週予算" '.astra_count_7d' "4"
+assert_j "レビュー枠: 実装側のトークン" '.astra_tokens_7d' "65"
+bud "$(review_rows 1 1000 2026-09-12 レビュー)"
+assert_j "レビュー枠: 今日-7日は窓に含まない" '.review.count_7d' "0"
+run "$BIN" --budget
+assert_j "レビュー枠: 既定 cap" '.review.cap' "150000000"
+assert_j "レビュー枠: ログが無ければ over でない" '.review.over' "false"
+run env ASTRA_REVIEW_WEEKLY_TOKEN_CAP=5 DELEGATE_LOG_DIR="$TMP/no-such-dir" "$BIN" --budget
+assert_j "レビュー枠: cap は環境変数で変えられる" '.review.cap' "5"
+
+# 実装の判定はレビュー枠の消費で Sol に落ちない
+REVDIR="$TMP/review-heavy"; mkdir -p "$REVDIR"
+review_rows 120 2000000 2026-09-19 レビュー > "$REVDIR/delegation-log.jsonl"
+run env DELEGATE_LOG_DIR="$REVDIR" "$BIN" --instruction "$INSTR" --kind 実装 --signals "$ASTRA_SIG"
+assert_j "レビュー枠: レビューが多くても実装の Astra は自動承認" '.astra_approval_source' "budget_auto"
+
 # ── 予算超過時の Astra 候補の扱い ──
 OVERDIR="$TMP/over"; mkdir -p "$OVERDIR"
 astra_rows 8 10000000 2026-09-19 > "$OVERDIR/delegation-log.jsonl"

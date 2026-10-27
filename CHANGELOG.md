@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.32.0] - 2026-10-27
+
+### Added
+
+- delegate-run `--astra-review`: 設計前・本番前の独立レビュー用の Astra の口。`--cli codex --mode readonly --model gpt-6-astra --effort high` 固定で、route は取らない。write・effort 違い・別モデル・別 CLI・`--route-id` / `--force-astra` との併用は拒否する。レビュー枠が週の上限を超えていたら警告だけ出して続行する
+- delegate-run: runs.jsonl に `astra_lane`(`review` / `route` / `forced` / null)を記録する。`astra_forced` は互換のために残す
+- delegate-run: 実行後のサマリの最後に、date・repo・cli・model・effort・commander・run_id・tokens・cost_usd を埋めた委任ログの `jq -cn` コマンドを出す(`--astra-review` なら kind も `レビュー`)
+- delegate-run `--lint-log`: date の欠落・形式違い(YYYY-MM-DD 以外)と、数値でも null でもない `review_findings` を逸脱として、記録テンプレートにないキーを警告として出す
+- delegate-route `--budget`: `review`(`tokens_7d` / `count_7d` / `cap` / `over` など)を足す。委任ログで `kind:"レビュー"`(旧 `独立レビュー` を含む)の Astra 行はレビュー枠に数える。上限は `.env` の `ASTRA_REVIEW_WEEKLY_TOKEN_CAP`(既定 1.5 億トークン)
+- テスト: レビュー枠・`astra_lane`・記録コマンド・`<synthetic>`・Linux のパスでの司令塔の解決・lint の新しい検査(delegate-run-tests)、予算の分離(delegate-route-tests)
+
+### Changed
+
+- delegate-route `--budget`: トップレベルの `astra_tokens_7d` / `astra_count_7d` / `tokens_null` / `date_invalid` / `over` は、レビュー以外(実装・相談・調査)の Astra だけを数える。実装の Astra の自動承認と Sol への切替は、レビューの消費に影響されなくなる
+- delegate-run: read-only で `--force-astra` を使うと、レビューなら `--astra-review` を使うよう警告する(止めない)
+- adapters/codex: Astra の使用条件に「レビュー枠」を追加。SKILL: レビュー枠の使い方、レビューの記録は `kind:"レビュー"`・`review_findings` は指摘の件数の合計(内訳は note)・実行後に出る記録コマンドを使うことを追記
+- lessons: 2026-10 の委任ログ見直し(1,431 件)の記録
+
+### Fixed
+
+- delegate-run: 司令塔モデルの解決(`--current-commander`・runs.jsonl の `commander`・`--audit-commander`)で、API エラー・中断の合成メッセージ `<synthetic>` を実モデルとして扱っていた。`<` で始まるモデル名は飛ばし、runs.jsonl に記録済みの `<synthetic>` は正とせずに transcript で解決する
+- delegate-run `--audit-commander`: prompt_file から司令塔の session_id を取る正規表現が macOS の `/claude-501/` 決め打ちで、Linux(`/claude-1000/` など)では解決できなかった
+
 ## [0.31.0] - 2026-10-27
 
 ### Changed

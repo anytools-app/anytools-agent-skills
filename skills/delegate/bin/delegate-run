@@ -18,6 +18,9 @@
 #   判定の関連付け: --route-id <rt_…>(delegate-route の判定 ID。runs.jsonl に記録される)
 #     gpt-6-astra は gate=confirmed かつ astra_approved=true の --route-id が必須(強行は --force-astra)
 #     --force は cooldown の強行専用で、Astra ゲートには効かない
+#   Astra のレビュー枠: --astra-review(設計前・本番前の独立レビュー専用。route 不要)
+#     使えるのは --cli codex --mode readonly --model gpt-6-astra --effort high のときだけ。
+#     実装の週予算とは別枠で数え、レビュー枠の超過は警告だけ出す(止めない)
 #
 # cooldown(limit を踏んだ CLI を記録し、回復まで実行前に拒否する):
 #   一覧: --cooldowns / 記録: --set-cooldown <cli> <30m|2h> [理由] / 解除: --clear-cooldown <cli>
@@ -133,6 +136,7 @@ cost_usd() {  # $1=cli $2=tokens_total → USD 文字列(単価未設定・非�
 # システムプロンプトの model ID は静的で /model 切替に追随しないため使わない。
 # CLAUDE_CODE_SESSION_ID からセッション transcript を引き、直近 assistant ターンの
 # 実モデル(.message.model)を返す。解決不能なら "unknown"。
+# API エラー・中断で入る合成メッセージ("model":"<synthetic>")は実モデルではないので飛ばす。
 resolve_commander() {
   local sid="${CLAUDE_CODE_SESSION_ID:-}"
   [ -n "$sid" ] || { echo "unknown"; return 0; }
@@ -143,7 +147,7 @@ resolve_commander() {
   local model
   model=$(grep '"type":"assistant"' "$tf" 2>/dev/null \
     | jq -rc 'select((.isSidechain // false)==false) | (.message.model // .model // empty)' 2>/dev/null \
-    | grep -v '^$' | tail -1)
+    | grep -v '^$' | grep -v '^<' | tail -1)
   [ -n "$model" ] && echo "$model" || echo "unknown"
 }
 
@@ -158,17 +162,21 @@ commander_for_run() {
   # 既に commander が記録済みならそれを正とする(自動記録後の委任)
   local recorded
   recorded=$(printf '%s' "$rec" | jq -r '.commander // empty' 2>/dev/null)
-  [ -n "$recorded" ] && { echo "$recorded"; return 0; }
+  # ただし <synthetic> など合成メッセージの値は正としない(transcript での解決に進む)
+  case "$recorded" in
+    ''|'<'*) ;;
+    *) echo "$recorded"; return 0 ;;
+  esac
   run_ts=$(printf '%s' "$rec" | jq -r '.ts // empty')
   pf=$(printf '%s' "$rec" | jq -r '(.prompt_file // .report_file) // empty')
-  csid=$(printf '%s' "$pf" | sed -nE 's#.*/claude-501/[^/]+/([0-9a-f-]{36})/.*#\1#p')
+  csid=$(printf '%s' "$pf" | sed -nE 's#.*/claude-[0-9]+/[^/]+/([0-9a-f-]{36})/.*#\1#p')
   [ -n "$csid" ] && [ -n "$run_ts" ] || { echo "unknown"; return 0; }
   tf=$(ls -1 "$HOME/.claude/projects/"*/"$csid.jsonl" 2>/dev/null | head -1)
   [ -n "$tf" ] && [ -f "$tf" ] || { echo "unknown"; return 0; }
   local model
   model=$(grep '"type":"assistant"' "$tf" 2>/dev/null \
     | jq -rc --arg ts "$run_ts" 'select((.isSidechain // false)==false) | select((.timestamp // "") <= $ts) | (.message.model // .model // empty)' 2>/dev/null \
-    | grep -v '^$' | tail -1)
+    | grep -v '^$' | grep -v '^<' | tail -1)
   [ -n "$model" ] && echo "$model" || echo "unknown"
 }
 
@@ -359,7 +367,8 @@ audit_rework() {
 # ── 委任ログの enum 検証(読み取り専用)──────────────────
 lint_delegation_log() {
   local log_file="$LOG_DIR/delegation-log.jsonl"
-  local line line_no=0 violations=0 index field allowed_json allowed_display value
+  local line line_no=0 violations=0 warnings=0 index field allowed_json allowed_display value msg extra
+  local known_keys='["date","repo","task","kind","cli","model","commander","effort","outcome","validation","resumes","scope_violation","delegation_verdict","routing_verdict","cause","note","run_id","rework_of","review_findings","tokens","cost_usd"]'
   local -a fields=(outcome cause validation kind routing_verdict delegation_verdict)
   local -a allowed_jsons=(
     '["採用","一部採用","破棄","未完了","失敗"]'
@@ -404,13 +413,39 @@ lint_delegation_log() {
         violations=$((violations + 1))
       fi
     done
+
+    # date は YYYY-MM-DD(予算・集計の期間判定に使う)、review_findings は数値か null
+    # (2026-10 に {ts,result,verdict} 形式の行と object の review_findings が実発生)
+    while IFS= read -r msg; do
+      [ -n "$msg" ] || continue
+      echo "line $line_no: $msg"
+      violations=$((violations + 1))
+    done < <(printf '%s\n' "$line" | jq -r '
+      select(type == "object")
+      | (if ((.date // null) | type) != "string" or ((.date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) | not)
+         then "date=\(.date // "(missing)" | tojson) (許容: YYYY-MM-DD)" else empty end),
+        (if has("review_findings") and ((.review_findings | type) as $t | ($t != "number" and $t != "null"))
+         then "review_findings=\(.review_findings | tojson) (許容: 数値|null。重さの内訳は note に書く)" else empty end)
+    ' 2>/dev/null)
+
+    # SKILL.md の記録テンプレートにないキーは警告(独自の形式の混入を早く見つける)
+    extra="$(printf '%s\n' "$line" | jq -r --argjson known "$known_keys" \
+      'select(type == "object") | [keys[] | select(. as $k | $known | index($k) | not)] | join(", ")' 2>/dev/null)"
+    if [ -n "$extra" ]; then
+      echo "line $line_no: 規約外のキー: $extra(警告。SKILL.md「委任ログ」のテンプレートで記録する)"
+      warnings=$((warnings + 1))
+    fi
   done < "$log_file"
 
   if [ "$violations" -eq 0 ]; then
-    echo "OK: ${line_no}行すべて規約準拠"
+    if [ "$warnings" -gt 0 ]; then
+      echo "OK: ${line_no}行すべて規約準拠(警告 ${warnings}件)"
+    else
+      echo "OK: ${line_no}行すべて規約準拠"
+    fi
     return 0
   fi
-  echo "NG: ${line_no}行中 ${violations}件の逸脱"
+  echo "NG: ${line_no}行中 ${violations}件の逸脱(警告 ${warnings}件)"
   return 1
 }
 
@@ -462,7 +497,7 @@ esac
 
 # ── 引数 ──────────────────────────────────────────────
 CLI="" MODE="" MODEL="" EFFORT="" CD="" PROMPT_FILE="" REPORT="" RESUME="" LOG_FILE=""
-TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0 FORCE_ASTRA=0 ROUTE_ID=""
+TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0 FORCE_ASTRA=0 ASTRA_REVIEW=0 ROUTE_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli) CLI="${2:?}"; shift 2 ;;
@@ -480,7 +515,8 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
     --force-astra) FORCE_ASTRA=1; shift ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    --astra-review) ASTRA_REVIEW=1; shift ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -569,12 +605,35 @@ fi
 # ── Astra ゲート(高コストモデルは delegate-route の承認済み判定を必須にする)──
 ROUTE_DECISIONS="$LOG_DIR/route-decisions.jsonl"
 ASTRA_FORCED=false
+ASTRA_LANE=""   # review(--astra-review)/ route(承認済み route)/ forced(--force-astra)/ 空(Astra 以外)
+
+# レビュー枠: 設計前・本番前の独立レビュー専用。組み合わせを固定し、route は求めない
+if [ "$ASTRA_REVIEW" -eq 1 ]; then
+  ASTRA_REVIEW_HINT="--astra-review は設計前・本番前の独立レビュー専用(--cli codex --mode readonly --model gpt-6-astra --effort high)"
+  [ "$CLI" = "codex" ] || die "--astra-review は codex 専用。$ASTRA_REVIEW_HINT"
+  [ "$MODE" = "readonly" ] || die "--astra-review は --mode readonly 専用(書き込みの委任は delegate-route の承認が必要)。$ASTRA_REVIEW_HINT"
+  [ "$MODEL" = "gpt-6-astra" ] || die "--astra-review は --model gpt-6-astra 専用(指定値: ${MODEL:-未指定})。$ASTRA_REVIEW_HINT"
+  [ "$EFFORT" = "high" ] || die "--astra-review は --effort high 専用(指定値: ${EFFORT:-未指定})。$ASTRA_REVIEW_HINT"
+  [ -z "$ROUTE_ID" ] || die "--astra-review と --route-id は併用しない(レビューは delegate-route の対象外)"
+  [ "$FORCE_ASTRA" -eq 0 ] || die "--astra-review と --force-astra は併用しない"
+  ASTRA_LANE="review"
+  # 予算超過は止めずに警告だけ(ユーザー方針: 本番前のレビューは Astra で回す)
+  REVIEW_BUDGET="$(DELEGATE_LOG_DIR="$LOG_DIR" "$SKILL_DIR/bin/delegate-route" --budget 2>/dev/null || true)"
+  if printf '%s' "$REVIEW_BUDGET" | jq -e '.review.over == true' >/dev/null 2>&1; then
+    warn "Astra のレビュー枠が週の上限を超えている($(printf '%s' "$REVIEW_BUDGET" | jq -r '"直近 7 日 \(.review.tokens_7d) / 上限 \(.review.cap) トークン、\(.review.count_7d) 件"'))。止めずに続行する"
+  fi
+fi
+
 if [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ] && [ "$FORCE_ASTRA" -eq 1 ]; then
   ASTRA_FORCED=true
+  ASTRA_LANE="forced"
   warn "Astra ゲートを --force-astra で強行した(delegate-route の承認を経ていない)。委任ログの note に理由を書くこと"
+  [ "$MODE" = "readonly" ] && \
+    warn "設計前・本番前の独立レビューなら --force-astra ではなく --astra-review を使う(実装の週予算と分けて数えるため)"
 fi
-if [ "$FORCE_ASTRA" -eq 0 ] && [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ]; then
-  ASTRA_HINT="Astra(gpt-6-astra)は delegate-route の確定済み route が必要: delegate-route --instruction <指示書> --kind 実装 --signals '{…}' で判定し(週予算内なら自動承認、超過なら Sol に切り替わる)、gate=confirmed かつ astra_approved=true の route_id を --route-id に渡す。人間が明示的に承認した場合のみ --force-astra で強行する(--force は cooldown 専用でこのゲートには効かない)"
+if [ "$FORCE_ASTRA" -eq 0 ] && [ "$ASTRA_REVIEW" -eq 0 ] && [ "$CLI" = "codex" ] && [ "$MODEL" = "gpt-6-astra" ]; then
+  ASTRA_LANE="route"
+  ASTRA_HINT="Astra(gpt-6-astra)は delegate-route の確定済み route が必要: delegate-route --instruction <指示書> --kind 実装 --signals '{…}' で判定し(週予算内なら自動承認、超過なら Sol に切り替わる)、gate=confirmed かつ astra_approved=true の route_id を --route-id に渡す。人間が明示的に承認した場合のみ --force-astra で強行する(--force は cooldown 専用でこのゲートには効かない)。設計前・本番前の独立レビュー(read-only)は --astra-review を使う"
   [ -n "$ROUTE_ID" ] || die "Astra の実行には --route-id が必要。$ASTRA_HINT"
   [ -s "$ROUTE_DECISIONS" ] || die "route-decisions.jsonl が存在しないか空(--route-id $ROUTE_ID)。$ASTRA_HINT"
   ROUTE_LINE="$(jq -Rrc --arg r "$ROUTE_ID" \
@@ -749,7 +808,7 @@ jq -cn \
   --arg cd "$CD" --arg prompt_file "$PROMPT_FILE" --arg log_file "$LOG_FILE" \
   --arg instruction_sha256 "$INSTRUCTION_SHA256" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
-  --arg route_id "$ROUTE_ID" --argjson astra_forced "$ASTRA_FORCED" \
+  --arg route_id "$ROUTE_ID" --argjson astra_forced "$ASTRA_FORCED" --arg astra_lane "$ASTRA_LANE" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
   --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" --arg cost_usd "$COST_USD" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
@@ -758,6 +817,7 @@ jq -cn \
     instruction_sha256:(if $instruction_sha256 == "" then null else $instruction_sha256 end),
     log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
     route_id:(if $route_id == "" then null else $route_id end),astra_forced:$astra_forced,
+    astra_lane:(if $astra_lane == "" then null else $astra_lane end),
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
     tokens_total:($tokens_total|tonumber? // null),tokens_detail:$tokens_detail,
     cost_usd:($cost_usd|tonumber? // null),
@@ -793,5 +853,49 @@ case "$COOLDOWN_AUTO" in
   recorded) warn "limit パターンを検知し $CLI を 1h の cooldown に記録した。代替先へルーティングする(誤検知なら delegate-run --clear-cooldown $CLI)" ;;
   suspect)  warn "ログに limit 類似の文字列がある(exit 0 のため自動記録なし)。実際に limit なら delegate-run --set-cooldown $CLI <期間> で記録する" ;;
 esac
-echo "評価ログへの記録: jq -cn ... --arg run_id \"$RUN_ID\" ...(SKILL.md「委任ログ」)"
+# ── 評価ログの記録コマンド(分かっている値を埋めて出す。判定の値は司令塔が埋める)──
+# 独自の形式で書かれるのを防ぐため、SKILL.md「委任ログ」のテンプレートと同じ形で出す
+# 単一引用符で囲む(printf %q は日本語をロケール次第で $'\343…' にするので使わない)
+sq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+log_repo_name() {
+  local common
+  common="$(git -C "$CD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+  if [ -n "$common" ]; then
+    case "$common" in */.git) common="${common%/.git}" ;; esac
+    basename "$common"
+  else
+    basename "$CD"
+  fi
+}
+LOG_KIND="<実装|相談|レビュー|調査>"
+[ "$ASTRA_LANE" = "review" ] && LOG_KIND="レビュー"
+LOG_EFFORT="${EFFORT:-なし}"
+LOG_MODEL="${MODEL:-<モデル>}"
+echo "評価ログへの記録(<…> を埋めて実行する。tokens はセッション累計なので、同じセッションの resume を別の行に記録するときは増分にする — SKILL.md「委任ログ」):"
+cat <<EOF
+jq -cn \\
+  --arg date $(sq "$(date +%F)") \\
+  --arg repo $(sq "$(log_repo_name)") \\
+  --arg task "<1行要約>" \\
+  --arg kind $(sq "$LOG_KIND") \\
+  --arg cli $(sq "$CLI") \\
+  --arg model $(sq "$LOG_MODEL") \\
+  --arg commander $(sq "$COMMANDER") \\
+  --arg effort $(sq "$LOG_EFFORT") \\
+  --arg outcome "<採用|一部採用|破棄|未完了|失敗>" \\
+  --arg validation "<pass|no_new_failures|fail|not_run>" \\
+  --arg delegation_verdict "<必要|委任不要>" \\
+  --arg routing_verdict "<適正|過剰|過小|委任先ミス>" \\
+  --arg cause "<none|model|instruction|spec_change|environment|tooling|product_decision|unknown>" \\
+  --arg note "<判定理由1行>" \\
+  --arg run_id $(sq "$RUN_ID") \\
+  --arg rework_of "" \\
+  --arg review_findings "<指摘の件数の合計(レビューの委任)/実装の委任は独立レビューの実指摘数/なければ空>" \\
+  --arg tokens $(sq "$TOK_TOTAL") \\
+  --arg cost_usd $(sq "$COST_USD") \\
+  --argjson resumes 0 \\
+  --argjson scope_violation false \\
+  '{date:\$date,repo:\$repo,task:\$task,kind:\$kind,cli:\$cli,model:\$model,commander:\$commander,effort:\$effort,outcome:\$outcome,validation:\$validation,resumes:\$resumes,scope_violation:\$scope_violation,delegation_verdict:\$delegation_verdict,routing_verdict:\$routing_verdict,cause:\$cause,note:\$note,run_id:\$run_id,rework_of:(if \$rework_of == "" then null else \$rework_of end),review_findings:(\$review_findings|tonumber? // null),tokens:(\$tokens|tonumber? // null),cost_usd:(\$cost_usd|tonumber? // null)}' \\
+  >> $(sq "$LOG_DIR/delegation-log.jsonl")
+EOF
 exit "$EXIT_CODE"
