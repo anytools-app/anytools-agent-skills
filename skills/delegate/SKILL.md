@@ -127,7 +127,7 @@ Claude Code が決めてよい(技術判断):
 5. ベースラインを計測する(下記)
 6. 指示書を書く(`templates.md`)。大きな機能は1回で渡さず、レビュー可能な単位に分割して順に委任する
 6.5. **Codex への実装・調査の委任は、ティア判定と確定ループを通す**(下記)。`gate:"confirmed"` になるまで委任を開始しない
-7. adapter の canonical command で実行する。生成・実行は原則 `bin/delegate-run` を使う(Codex は手順 6.5 の `--route-id` を付ける。必須フラグ・事前チェック・ログ隔離・session ID 控え・runs.jsonl 記録を自動化。`--dry-run` で実行前にコマンドを確認できる。canonical command の正は引き続き各 adapter)
+7. adapter の canonical command で実行する。生成・実行は原則 `bin/delegate-run` を使う。**高速モードなど、オプションが足りないことを理由に直接実行しない**(直接実行では指示書・ログ・報告が scratchpad にしか残らない。足りない口は `delegate-run` に足す)(Codex は手順 6.5 の `--route-id` を付ける。必須フラグ・事前チェック・ログ隔離・session ID 控え・runs.jsonl 記録を自動化。`--dry-run` で実行前にコマンドを確認できる。canonical command の正は引き続き各 adapter)
 8. 成果物をレビューする(下記)。高リスクは独立レビューを挟む
 9. 修正は元セッションへの継続指示で、同一原因につき最大2回(下記「修正・再委任の上限」)
 10. 合格した変更だけ Claude Code がコミットし、採用・修正・除外した点をユーザーに報告する
@@ -285,6 +285,23 @@ tail -30 "$LOG_DIR/delegation-log.jsonl" | jq -r 'select(.kind == "レビュー"
 - 採用する差分は Claude Code がメイン worktree へ patch / cherry-pick で取り込む。worktree 側でコミットさせない(コミットは常にメイン側で Claude Code が行う)
 - worktree 削除前に `git status` と `git diff` で未回収の変更・未追跡ファイルがないか確認する
 - read-only の相談は原則同一ツリーで並走してよい(Codex / Grok は OS レベルで書き込みが制限される)。**例外: Antigravity は read-only 保証がない**ため、`adapters/antigravity.md` の「worktree に隔離する条件」に従う
+
+## 作業ファイルの置き場所(scratchpad は消える)
+
+scratchpad(`/tmp/claude-<uid>/…`)は起動時に消える(`systemd-tmpfiles` の `D /tmp`。再起動しなくても 30 日で消える)。作った時点で、次の表に従って置き場所を決める。
+
+| 種類 | 置き場所 | 方法 |
+|---|---|---|
+| 指示書・依頼書 | `$LOG_DIR/instructions/<run_id>.md` | `delegate-run` が自動で退避 |
+| 委任先の報告(`-o`) | `$LOG_DIR/reports/<run_id>.md` | `delegate-run` が自動で退避。**必ず `-o` を付ける** |
+| 委任先の生ログ | `$LOG_DIR/runs/<run_id>.log` | `delegate-run` の既定。`--log` で scratchpad に向けない |
+| 採用した設計(詳細設計・execplan) | 対象リポジトリの `docs/`(例: `docs/execplans/`) | 司令塔が採否を決めた時点で書き、コミットする。たたき台の原文は報告の退避で残り、execplan には元の `run_id` を書く |
+| ローカル検証の環境(設定・セットアップスクリプト) | 対象リポジトリ(秘密を含まない形で) | 動いた時点でスクリプトに落とす |
+| 秘密(`.dev.vars`・鍵・証明書) | 永続化しない | 生成スクリプトだけを残し、毎回作り直す |
+| 一時物(依頼の組み立て途中・diff の抜き出し・スクリーンショット) | scratchpad のまま | 消えてよい |
+
+- `$LOG_DIR` 配下には秘密が混ざりうる(生ログ・報告)。リポジトリにコミットしない。リポジトリへは司令塔が中身を読んで選んだものだけを書く
+- 直接実行(`delegate-run` を経由しない)をやむを得ず使った場合は、終了時に指示書・報告を上の場所へ手で写す
 
 ## 秘密情報・外部送信ルール
 

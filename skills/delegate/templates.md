@@ -1,6 +1,6 @@
 # 委任テンプレート
 
-指示書・依頼書は scratchpad にファイルとして保存し、各 adapter の canonical command から `"$(cat <ファイル>)"` で渡す。テンプレートは次の3種類だけ。
+指示書・依頼書は scratchpad にファイルとして保存し、各 adapter の canonical command から `"$(cat <ファイル>)"` で渡す。scratchpad は再起動で消えるため、残すべきものは `SKILL.md`「作業ファイルの置き場所」に従って退避する(`delegate-run` 経由なら指示書と報告は自動で退避される)。テンプレートは次の3種類だけ。
 
 ## 1. 実装指示書
 

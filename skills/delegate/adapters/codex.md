@@ -150,6 +150,11 @@ codex exec resume <SESSION_ID> \
 - **`-c 'sandbox_mode=...'`・`approval_policy`・`web_search`・モデル系フラグを必ず付け直す**。resume は元セッションの sandbox・モデル・reasoning effort を引き継がない場合があり(実測記録は `../lessons.md`「Codex」)、config のデフォルト値も更新・環境差で変わるため、今後のバージョンでも継承を期待しない
 - `codex exec resume --last` は「マシン全体で最新のセッション」を拾い、無関係なセッションを掴む恐れがあるため使わない。SESSION_ID を明示する
 
+## 高速モード(service tier)
+
+- `delegate-run --fast` で `-c 'service_tier="priority"'` を付ける(resume でも付け直す。`runs.jsonl` の `service_tier` に残る)。`models_cache.json` の `service_tiers` で id `priority` = 名前 Fast(「2x speed, increased usage」)。不正な値だと「not advertised ... will be omitted」の警告が出て無視される(2026-10-02、0.159.2 / gpt-6.1-sol で確認)
+- 速度の代わりに枠の消費が増える。使うかどうかはユーザーの指示に従う
+
 ## 実行の作法
 
 - 応答には数分かかる。小さな委任はフォアグラウンド(timeout 600000ms=上限10分)でよいが、**大きな委任(複数ファイル・テスト込み)は Bash の run_in_background で実行し、完了通知が来てからレビューに入る**。フォアグラウンドで上限を超えるとプロセスごと殺され、成果物が中途半端な状態で残る

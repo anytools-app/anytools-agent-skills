@@ -14,6 +14,8 @@
 #     --cd /path/to/repo --prompt-file question.md [--timeout 10]
 #   delegate-run --cli grok --mode readonly --effort medium --cd /path/to/repo --prompt-file q.md
 #   共通: -o <file> / --out-report <file>: 最終レポートの保存先。codex はネイティブの -o、grok / agy はログのコピー
+#     レポートは run 後に $LOG_DIR/reports/<run_id>.md へも退避する(指示書は instructions/<run_id>.md)
+#   高速モード(codex のみ): --fast(-c 'service_tier="priority"' を付ける。resume でも付け直す)
 #   resume/継続: --resume <SESSION_ID|CONVERSATION_UUID>(全フラグは自動で付け直される)
 #   判定の関連付け: --route-id <rt_…>(delegate-route の判定 ID。runs.jsonl に記録される)
 #     gpt-6-astra は gate=confirmed かつ astra_approved=true の --route-id が必須(強行は --force-astra)
@@ -497,7 +499,7 @@ esac
 
 # ── 引数 ──────────────────────────────────────────────
 CLI="" MODE="" MODEL="" EFFORT="" CD="" PROMPT_FILE="" REPORT="" RESUME="" LOG_FILE=""
-TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0 FORCE_ASTRA=0 ASTRA_REVIEW=0 ROUTE_ID=""
+TIMEOUT_MIN="" MAX_TURNS="" DRY_RUN=0 FORCE=0 FORCE_ASTRA=0 ASTRA_REVIEW=0 ROUTE_ID="" SERVICE_TIER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli) CLI="${2:?}"; shift 2 ;;
@@ -516,7 +518,8 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift ;;
     --force-astra) FORCE_ASTRA=1; shift ;;
     --astra-review) ASTRA_REVIEW=1; shift ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    --fast) SERVICE_TIER="priority"; shift ;;
+    -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
     *) die "不明な引数: $1(禁止フラグの手動指定も含めて受け付けない)" ;;
   esac
 done
@@ -524,6 +527,7 @@ done
 # ── 共通バリデーション ─────────────────────────────────
 case "$CLI" in codex|grok|agy) ;; *) die "--cli は codex|grok|agy" ;; esac
 case "$MODE" in write|readonly) ;; *) die "--mode は write|readonly" ;; esac
+[ -z "$SERVICE_TIER" ] || [ "$CLI" = codex ] || die "--fast は codex 専用"
 [ -n "$CD" ] || die "--cd は必須"
 case "$CD" in /*) ;; *) die "--cd は絶対パスで指定する" ;; esac
 [ -d "$CD" ] || die "--cd が存在しない: $CD"
@@ -692,6 +696,7 @@ case "$CLI" in
       ARGS=(codex exec --sandbox "$([ "$MODE" = write ] && echo workspace-write || echo read-only)")
     fi
     ARGS+=(-c 'approval_policy="never"' -c 'web_search="disabled"' -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
+    [ -n "$SERVICE_TIER" ] && ARGS+=(-c "service_tier=\"$SERVICE_TIER\"")
     [ -z "$RESUME" ] && ARGS+=(--cd "$CD")
     [ -n "$REPORT" ] && ARGS+=(-o "$REPORT")
     ;;
@@ -772,6 +777,18 @@ case "$CLI" in
     ;;
 esac
 
+# ── レポートの退避(scratchpad は再起動で消えるため。失敗しても本体の exit code は変えない)──
+REPORT_ARCHIVE=""
+if [ -n "$REPORT" ]; then
+  if [ ! -s "$REPORT" ]; then
+    warn "レポートが生成されていない: $REPORT"
+  elif mkdir -p "$LOG_DIR/reports" 2>/dev/null && cp "$REPORT" "$LOG_DIR/reports/$RUN_ID.md" 2>/dev/null; then
+    REPORT_ARCHIVE="$LOG_DIR/reports/$RUN_ID.md"
+  else
+    warn "レポートの退避に失敗: $LOG_DIR/reports/$RUN_ID.md"
+  fi
+fi
+
 # ── session / conversation ID の取得 ──────────────────
 SESSION_ID=""
 case "$CLI" in
@@ -809,13 +826,16 @@ jq -cn \
   --arg instruction_sha256 "$INSTRUCTION_SHA256" \
   --arg report_file "$REPORT" --arg resume_of "$RESUME" --arg session_id "$SESSION_ID" \
   --arg route_id "$ROUTE_ID" --argjson astra_forced "$ASTRA_FORCED" --arg astra_lane "$ASTRA_LANE" \
+  --arg service_tier "$SERVICE_TIER" --arg report_archive "$REPORT_ARCHIVE" \
   --arg dirty_before "$DIRTY_BEFORE" --arg dirty_after "$DIRTY_AFTER" --arg cmd "$CMD_DISPLAY" \
   --arg tokens_detail "$TOKENS" --arg tokens_total "$TOK_TOTAL" --arg cost_usd "$COST_USD" \
   --argjson exit_code "$EXIT_CODE" --argjson duration_s "$DURATION" \
   '{run_id:$run_id,ts:$ts,cli:$cli,mode:$mode,model:$model,effort:$effort,commander:$commander,cd:$cd,
     prompt_file:$prompt_file,
     instruction_sha256:(if $instruction_sha256 == "" then null else $instruction_sha256 end),
-    log_file:$log_file,report_file:$report_file,resume_of:$resume_of,
+    log_file:$log_file,report_file:$report_file,
+    report_archive:(if $report_archive == "" then null else $report_archive end),
+    service_tier:(if $service_tier == "" then null else $service_tier end),resume_of:$resume_of,
     route_id:(if $route_id == "" then null else $route_id end),astra_forced:$astra_forced,
     astra_lane:(if $astra_lane == "" then null else $astra_lane end),
     exit_code:$exit_code,duration_s:$duration_s,session_id:$session_id,
@@ -843,6 +863,7 @@ if [ -n "$REPORT" ]; then
     grok|agy) echo "report: $REPORT(ログのコピー)" ;;
     codex) echo "report: $REPORT" ;;
   esac
+  [ -n "$REPORT_ARCHIVE" ] && echo "report_archive: $REPORT_ARCHIVE"
 fi
 if [ -n "$DIRTY_BEFORE" ] && [ "$DIRTY_BEFORE" != "$DIRTY_AFTER" ]; then
   echo "git: dirty $DIRTY_BEFORE → $DIRTY_AFTER 件(マニフェスト照合を忘れずに)"

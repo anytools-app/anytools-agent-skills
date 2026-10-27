@@ -39,6 +39,31 @@ assert_not_contains "codex: bypass 禁止"    "--dangerously-bypass-approvals-an
 assert_not_contains "codex: full-auto 禁止" "--full-auto"
 assert_not_contains "codex: skip-git-repo-check 禁止" "--skip-git-repo-check"
 
+# ── Codex: --fast は service_tier="priority"(高速モード)を付ける。既定では付けない ──
+run "$BIN" --dry-run --fast --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "codex --fast dry-run 成功" 0
+assert_contains "codex --fast: service_tier"  'service_tier=\"priority\"'
+assert_contains "codex --fast: sandbox は維持" "--sandbox workspace-write"
+run "$BIN" --dry-run --fast --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT" --resume 0123abcd-0000-7000-8000-000000000000
+assert_contains "codex --fast resume: service_tier 再指定" 'service_tier=\"priority\"'
+run "$BIN" --dry-run --cli codex --mode write --model gpt-5.6-terra --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_not_contains "codex 既定: service_tier なし" "service_tier"
+run "$BIN" --dry-run --fast --cli agy --mode readonly --model "Gemini 3.1 Pro (High)" --cd "$NONGIT" --prompt-file "$PROMPT"
+assert_exit "--fast は codex 専用(agy は拒否)" 2
+assert_contains "--fast 拒否: 理由表示" "--fast は codex 専用"
+# --fast は --astra-review と併用できる(どちらも codex 専用)
+run "$BIN" --dry-run --fast --astra-review --cli codex --mode readonly --model gpt-6-astra --effort high --cd "$GITDIR" --prompt-file "$PROMPT"
+assert_exit "--fast + --astra-review: 併用できる" 0
+assert_contains "--fast + --astra-review: service_tier" 'service_tier=\"priority\"'
+assert_contains "--fast + --astra-review: read-only" "--sandbox read-only"
+# --help はヘッダーの最後(ログ保存先)まで出し、--fast と --astra-review を両方含む
+run "$BIN" --help
+assert_contains "help: --fast" "--fast"
+assert_contains "help: --astra-review" "--astra-review"
+assert_contains "help: --audit-rework まで出る" "--audit-rework"
+assert_contains "help: ログ保存先まで出る" "ログ保存先"
+assert_not_contains "help: コードは出さない" "set -u"
+
 # ── Codex: readonly は read-only sandbox ──
 run "$BIN" --dry-run --cli codex --mode readonly --model gpt-5.6-luna --effort medium --cd "$GITDIR" --prompt-file "$PROMPT"
 assert_contains "codex readonly: sandbox" "--sandbox read-only"
@@ -817,6 +842,31 @@ run env DELEGATE_LOG_DIR="$L2DIR" "$BIN" --lint-log
 assert_exit "lint: 規約外のキーは警告だけ(exit 0)" 0
 assert_contains "lint: 規約外のキーを列挙" "規約外のキー: result, verdict"
 assert_contains "lint: 警告の件数" "警告 1件"
+
+# ── run 実行: 最終レポートを reports/<run_id>.md へ退避し、service_tier を runs.jsonl に残す ──
+printf '#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && echo "報告本文" > "$2"; shift; done\n' > "$FAKEBIN/codex"; chmod +x "$FAKEBIN/codex"
+REPORT_FILE="$TMP/report.md"
+run env HOME="$RUNHOME" PATH="$FAKEBIN:$PATH" "$BIN" --fast --cli codex --mode readonly --model gpt-5.6-luna --effort medium \
+  --cd "$GITDIR" --prompt-file "$PROMPT" -o "$REPORT_FILE"
+assert_exit "run: fake codex(-o あり)の実行に成功" 0
+RID4="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+if [ -f "$DELEGATE_LOG_DIR/reports/$RID4.md" ] && cmp -s "$REPORT_FILE" "$DELEGATE_LOG_DIR/reports/$RID4.md"; then ok
+else OUT="$(ls -R "$DELEGATE_LOG_DIR" 2>&1)"; ng "run: レポートを reports/<run_id>.md へ退避"; fi
+LOGGED_TIER="$(jq -r --arg r "$RID4" 'select(.run_id==$r) | .service_tier' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_TIER" = "priority" ] && ok || ng "run: --fast の run は service_tier=priority(実際: $LOGGED_TIER)"
+LOGGED_ARCH="$(jq -r --arg r "$RID4" 'select(.run_id==$r) | .report_archive' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_ARCH" = "$DELEGATE_LOG_DIR/reports/$RID4.md" ] && ok || ng "run: runs.jsonl に report_archive を記録(実際: $LOGGED_ARCH)"
+LOGGED_TIER3="$(jq -r --arg r "$RID3" 'select(.run_id==$r) | .service_tier' "$DELEGATE_LOG_DIR/runs.jsonl" 2>/dev/null)"
+[ "$LOGGED_TIER3" = "null" ] && ok || ng "run: --fast なしは service_tier=null(実際: $LOGGED_TIER3)"
+
+# レポートが作られなかった run は退避せず、exit code も変えない
+printf '#!/bin/bash\nexit 0\n' > "$FAKEBIN/codex"; chmod +x "$FAKEBIN/codex"
+run env HOME="$RUNHOME" PATH="$FAKEBIN:$PATH" "$BIN" --cli codex --mode readonly --model gpt-5.6-luna --effort medium \
+  --cd "$GITDIR" --prompt-file "$PROMPT" -o "$TMP/missing-report.md"
+assert_exit "run: レポート未生成でも exit code は本体のまま" 0
+RID5="$(printf '%s' "$OUT" | sed -n 's/^run_id: //p' | head -1)"
+[ ! -e "$DELEGATE_LOG_DIR/reports/$RID5.md" ] && ok || ng "run: レポート未生成なら退避しない"
+assert_contains "run: レポート未生成の警告" "レポートが生成されていない"
 
 echo
 echo "PASS: $PASS / FAIL: $FAIL"

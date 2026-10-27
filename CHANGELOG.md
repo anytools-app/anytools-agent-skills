@@ -3,6 +3,22 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.33.0] - 2026-10-27
+
+2026-10-02 にローカルの `main` にだけ入れていた 2 つの変更を、書き換え後の履歴へ移植した(当時の件名は「0.31.0」だったが、origin の 0.31.0 とは別物)。
+
+### Added
+
+- delegate-run `--fast`: Codex に `-c 'service_tier="priority"'`(高速モード)を付ける。resume でも付け直す。codex 以外は拒否する。`--astra-review` とも併用できる
+- delegate-run: `-o` の最終レポートを実行後に `$LOG_DIR/reports/<run_id>.md` へ退避する。レポートが無ければ警告だけ出し、本体の exit code は変えない
+- delegate-run: runs.jsonl に `service_tier` と `report_archive` を記録する
+- SKILL.md「作業ファイルの置き場所(scratchpad は消える)」: 指示書・報告・生ログ・採用した設計・秘密をどこに置くかの表。手順 7 に「オプションが足りないことを理由に delegate-run を迂回しない」を追記
+- adapters/codex.md「高速モード(service tier)」の節
+
+### Fixed
+
+- delegate-run `--help` がヘッダーの途中(`--audit-commander`)で切れていたのを、ログ保存先の行まで出すようにした
+
 ## [0.32.0] - 2026-10-27
 
 ### Added
